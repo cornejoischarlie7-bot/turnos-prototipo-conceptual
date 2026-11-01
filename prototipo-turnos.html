@@ -1,0 +1,963 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Turnos Pro · Fase 2</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config = { darkMode: 'media' }</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<style>
+  body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .hatch { background-image: repeating-linear-gradient(45deg, rgba(100,116,139,.18) 0 6px, transparent 6px 12px); }
+</style>
+</head>
+<body class="bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 antialiased">
+<div id="root"></div>
+
+<script type="text/babel">
+/* =====================================================================
+   Turnos Pro — Capa 1 (Frontend) de la Fase 2 (plan.md §3.1)
+   Derivado de index.html, que queda sin cambios como prototipo de la Fase 1.
+   Secciones: 1 Config · 2 API · 3 Tiempo · 4 Ayudas visuales ·
+              5 Datos locales · 6 UI compartida · 7 Vista Cliente ·
+              8 Vista Administrador · 9 App
+   Los turnos viven en el Backend (GET/POST /api/turnos). La UI no decide si una
+   reserva o cancelación es válida: muestra lo que responde el servidor.
+   Se sirve en http://localhost:5500 (no con doble clic: CORS necesita un origen HTTP).
+   ===================================================================== */
+const { useState, useMemo, useEffect, useCallback, createContext, useContext } = React;
+
+/* ============================ 1. CONFIG ============================ */
+// Solo para ayudas visuales (deshabilitar botones, armar la grilla). Decide el Backend.
+const CONFIG = { CANCEL_WINDOW_H: 2, MIN_LEAD_H: 1, HORIZON_DAYS: 60, GRID_MIN: 15 };
+const MIN = 60000, HOUR = 3600000, DAY = 86400000;
+
+/* ============================ 2. API (spec §11) ============================ */
+const API_BASE = 'http://localhost:8000';
+
+// Los id son los UUID de la semilla del Backend (backend/seed.py: uid("p1"), …), spec D-08.
+const ID = {
+  admin: 'af237f56-cd4c-54ce-8278-829fcf0a59ca',
+  p1: '6d1a4419-69e8-534c-bcf9-d49e3715528d', p2: '94097ec9-ab5e-5aa9-b722-be67f43d1578', p3: '0f532621-ed4d-5f6b-91c8-6a6eacde44c8',
+  c1: '4a877f1b-83dd-5f00-8688-eb2df8817acb', c2: '6dc2ec40-691f-5632-88fe-22fa2f6bbd63', c3: 'fcdab80f-eff8-5af2-8989-a69c3c9a9f34',
+  s1: '603a6585-6d35-541b-af69-6876756d62e2', s2: '5085049f-acb2-5dba-b432-7379e610b400', s3: '5fbe74b8-c969-5547-b817-41acc55bc96e',
+  s4: 'fdd69c19-1cab-5204-bf02-4472cc753486', s5: '6b917548-e810-5602-88b9-5b2f149b4722', s6: 'b89ab797-2a0d-587d-9ef9-ab63dde46621',
+  b1: '84c2009b-4a78-59cd-aa47-cdd95502ef8d', b2: '2b667061-5a3d-5603-a3fb-2cde06b3bfbf',
+};
+
+class ApiError extends Error {
+  constructor(code, message, http) { super(message); this.code = code; this.http = http; }
+}
+// Toda solicitud lleva el actor en X-Usuario-Id (spec D-06). Los errores llegan como
+// { error: { codigo, mensaje } } (spec §11.1). Sin respuesta del servidor → OFFLINE.
+async function api(path, { actorId, method = 'GET', body } = {}) {
+  let res;
+  try {
+    res = await fetch(API_BASE + path, {
+      method,
+      headers: { 'Content-Type': 'application/json', 'X-Usuario-Id': actorId },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new ApiError('OFFLINE', `Sin conexión con el servidor (${API_BASE}).`, 0);
+  }
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new ApiError(data?.error?.codigo || 'ERROR', data?.error?.mensaje || `Error HTTP ${res.status}.`, res.status);
+  return data;
+}
+const toIso = (ts) => new Date(ts).toISOString().replace(/\.\d{3}Z$/, 'Z');
+const Api = {
+  listarTurnos: (actorId) => api('/api/turnos', { actorId }),
+  reservar: (actorId, servicioId, inicio, clienteId) =>
+    api('/api/turnos', { actorId, method: 'POST', body: { servicio_id: servicioId, inicio: toIso(inicio), ...(clienteId ? { cliente_id: clienteId } : {}) } }),
+  cancelar: (actorId, turnoId, motivo) =>
+    api(`/api/turnos/${encodeURIComponent(turnoId)}/cancelar`, { actorId, method: 'POST', body: motivo ? { motivo } : {} }),
+};
+// Turno de la API (spec §11.2) → forma que usa la UI. El rol de quien canceló no es campo
+// de Turno (plan §4): se deduce del usuario en cancelado_por_id.
+function turnoDeApi(t, users) {
+  const por = users.find((u) => u.id === t.cancelado_por_id);
+  return { id: t.id, clienteId: t.cliente_id, profesionalId: t.profesional_id, servicioId: t.servicio_id,
+    inicio: Date.parse(t.inicio), fin: Date.parse(t.fin), estado: t.estado, motivo: t.motivo_cancelacion,
+    canceladoPor: t.cancelado_por_id, canceladoRol: por ? por.role : null, creadoEn: Date.parse(t.creado_en) };
+}
+
+/* ============================ 3. TIEMPO ============================ */
+const pad = (n) => String(n).padStart(2, '0');
+const dayStart = (ts) => { const d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); };
+const addDays = (ts, n) => { const d = new Date(ts); d.setDate(d.getDate() + n); return d.getTime(); };
+const atMin = (dayTs, m) => { const d = new Date(dayTs); d.setHours(Math.floor(m / 60), m % 60, 0, 0); return d.getTime(); };
+const minOfDay = (ts) => { const d = new Date(ts); return d.getHours() * 60 + d.getMinutes(); };
+const overlaps = (aS, aE, bS, bE) => aS < bE && bS < aE; // intervalos [inicio, fin)
+const isBusinessDay = (ts) => { const w = new Date(ts).getDay(); return w >= 1 && w <= 5; };
+const addBusinessDays = (ts, n) => {
+  let t = ts, left = Math.abs(n); const step = n < 0 ? -1 : 1;
+  while (left > 0) { t = addDays(t, step); if (isBusinessDay(t)) left--; }
+  return t;
+};
+const weekStart = (ts) => addDays(dayStart(ts), -((new Date(ts).getDay() + 6) % 7));
+const fmtTime = (ts) => { const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const cap = (x) => x.charAt(0).toUpperCase() + x.slice(1);
+const fmtDate = (ts) => cap(new Date(ts).toLocaleDateString('es-AR', { weekday: 'short', day: 'numeric', month: 'short' }));
+const fmtDateLong = (ts) => cap(new Date(ts).toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' }));
+const fmtDT = (ts) => `${fmtDate(ts)} · ${fmtTime(ts)}`;
+const toInputDate = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+const fromInputDate = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d).getTime(); };
+const fmtDur = (ms) => { const m = Math.max(0, Math.round(ms / MIN)); const h = Math.floor(m / 60); return h ? `${h} h ${m % 60} min` : `${m} min`; };
+const money = (n) => n.toLocaleString('es-AR', { style: 'currency', currency: 'ARS', maximumFractionDigits: 0 });
+
+/* ============================ 4. AYUDAS VISUALES ============================ */
+// Ya no deciden nada (plan §3.1): solo arman la grilla y deshabilitan botones.
+const svcOf = (s, id) => s.services.find((x) => x.id === id);
+const userOf = (s, id) => s.users.find((x) => x.id === id);
+const inScope = (actor, profesionalId) => actor.role === 'ADMIN' || (actor.role === 'PROFESIONAL' && actor.id === profesionalId);
+
+// Slots que parecen libres según los datos locales y los turnos visibles para el actor.
+// Un cliente no ve los turnos de otros clientes (RBAC-04): el Backend tiene la última palabra (SLOT_UNAVAILABLE).
+function slotLibre(s, profId, inicio, fin) {
+  const d = new Date(inicio);
+  if (d.getMinutes() % CONFIG.GRID_MIN) return false;
+  if (inicio < s.now + CONFIG.MIN_LEAD_H * HOUR || inicio > s.now + CONFIG.HORIZON_DAYS * DAY) return false;
+  const sch = s.schedules[profId], mod = minOfDay(inicio), dur = (fin - inicio) / MIN;
+  if (!(sch.days.includes(d.getDay()) && sch.ranges.some(([a, b]) => mod >= a && mod + dur <= b))) return false;
+  if (s.blocks.some((b) => b.profesionalId === profId && overlaps(inicio, fin, b.inicio, b.fin))) return false;
+  return !s.turnos.some((t) => t.estado === 'CONFIRMADO' && t.profesionalId === profId && overlaps(inicio, fin, t.inicio, t.fin));
+}
+function computeSlots(s, servicioId, dayTs) {
+  const svc = svcOf(s, servicioId);
+  if (!svc || !svc.activo) return { error: { code: 'SERVICE_UNAVAILABLE', message: 'El servicio no está disponible.' }, slots: [] };
+  const day = dayStart(dayTs);
+  if (day < dayStart(s.now)) return { error: { code: 'INVALID_TIME_RANGE', message: 'Esa fecha ya pasó.' }, slots: [] };
+  if (day > dayStart(s.now + CONFIG.HORIZON_DAYS * DAY))
+    return { error: { code: 'INVALID_TIME_RANGE', message: `Solo se puede reservar hasta ${CONFIG.HORIZON_DAYS} días hacia adelante.` }, slots: [] };
+  const sch = s.schedules[svc.profesionalId], slots = [];
+  if (!sch.days.includes(new Date(day).getDay())) return { slots };
+  for (const [a, b] of sch.ranges)
+    for (let m = a; m + svc.duracionMin <= b; m += CONFIG.GRID_MIN) {
+      const inicio = atMin(day, m), fin = inicio + svc.duracionMin * MIN;
+      if (slotLibre(s, svc.profesionalId, inicio, fin)) slots.push({ inicio, fin });
+    }
+  return { slots };
+}
+function canClientCancel(t, now) {
+  if (t.estado !== 'CONFIRMADO') return { ok: false, reason: 'El turno ya no está confirmado.' };
+  if (now >= t.inicio) return { ok: false, reason: 'El turno ya comenzó.' };
+  if (t.inicio - now < CONFIG.CANCEL_WINDOW_H * HOUR)
+    return { ok: false, reason: `Faltan menos de ${CONFIG.CANCEL_WINDOW_H} horas para el turno.` };
+  return { ok: true };
+}
+
+/* ---- F-12: métricas (sobre los turnos que devuelve el Backend para el actor) ---- */
+function availableMinutes(s, profId, from, to) {
+  const sch = s.schedules[profId]; let total = 0;
+  for (let d = dayStart(from); d < to; d = addDays(d, 1)) {
+    if (!sch.days.includes(new Date(d).getDay())) continue;
+    for (const [a, b] of sch.ranges) {
+      const st = atMin(d, a), en = atMin(d, b); let mins = (en - st) / MIN;
+      for (const bl of s.blocks)
+        if (bl.profesionalId === profId && overlaps(st, en, bl.inicio, bl.fin)) mins -= (Math.min(en, bl.fin) - Math.max(st, bl.inicio)) / MIN;
+      total += Math.max(0, mins);
+    }
+  }
+  return total;
+}
+function computeMetrics(s, profIds, period) {
+  const turnos = s.turnos.filter((t) => profIds.includes(t.profesionalId));
+  let from, to;
+  if (period === 'semana') { from = weekStart(s.now); to = addDays(from, 7); }
+  else if (period === 'mes') { const d = new Date(s.now); from = new Date(d.getFullYear(), d.getMonth(), 1).getTime(); to = new Date(d.getFullYear(), d.getMonth() + 1, 1).getTime(); }
+  else {
+    const xs = turnos.map((t) => t.inicio);
+    from = xs.length ? dayStart(Math.min(...xs)) : dayStart(s.now);
+    to = xs.length ? addDays(dayStart(Math.max(...xs)), 1) : addDays(from, 1);
+  }
+  const inP = turnos.filter((t) => t.inicio >= from && t.inicio < to);
+  const count = (e) => inP.filter((t) => t.estado === e).length;
+  const canc = inP.filter((t) => t.estado === 'CANCELADO');
+  const booked = inP.filter((t) => t.estado !== 'CANCELADO').reduce((a, t) => a + (t.fin - t.inicio) / MIN, 0);
+  const avail = profIds.reduce((a, p) => a + availableMinutes(s, p, from, to), 0);
+  const top = {};
+  inP.filter((t) => t.estado !== 'CANCELADO').forEach((t) => { top[t.servicioId] = (top[t.servicioId] || 0) + 1; });
+  const perDay = [];
+  for (let d = from; d < to && perDay.length <= 62; d = addDays(d, 1)) perDay.push({ day: d, n: inP.filter((t) => t.estado !== 'CANCELADO' && dayStart(t.inicio) === d).length });
+  const comp = count('COMPLETADO'), aus = count('AUSENTE');
+  return {
+    from, to, total: inP.length, confirmados: count('CONFIRMADO'), completados: comp, ausentes: aus, cancelados: canc.length,
+    tasaCancel: inP.length ? canc.length / inP.length : 0,
+    cancelPorRol: { CLIENTE: canc.filter((t) => t.canceladoRol === 'CLIENTE').length, PROFESIONAL: canc.filter((t) => t.canceladoRol === 'PROFESIONAL').length, ADMIN: canc.filter((t) => t.canceladoRol === 'ADMIN').length },
+    tasaAusent: comp + aus ? aus / (comp + aus) : 0,
+    ocupacion: avail ? Math.min(1, booked / avail) : 0, bookedMin: booked, availMin: avail,
+    top: Object.entries(top).map(([id, n]) => ({ svc: svcOf(s, id), n })).filter((x) => x.svc).sort((a, b) => b.n - a.n),
+    perDay,
+  };
+}
+
+/* ============================ 5. DATOS LOCALES (spec D-08) ============================ */
+// Catálogo, horarios y bloqueos siguen locales hasta que la spec defina sus endpoints.
+// Mismos id y fechas que backend/seed.py: D0 es el próximo día hábil después de hoy.
+// Los turnos NO están acá: vienen del Backend.
+function makeLocalData() {
+  const D0 = addBusinessDays(dayStart(Date.now()), 1);
+  const at = (n, h, m = 0) => atMin(n === 0 ? D0 : addBusinessDays(D0, n), h * 60 + m);
+  const users = [
+    { id: ID.admin, role: 'ADMIN', nombre: 'Admin General', email: 'admin@turnospro.test', telefono: '+5491100000000', emailVerificado: true },
+    { id: ID.p1, role: 'PROFESIONAL', nombre: 'Dra. Ana Martínez', email: 'ana@turnospro.test', telefono: '+5491100000001', emailVerificado: true },
+    { id: ID.p2, role: 'PROFESIONAL', nombre: 'Dr. Bruno Salas', email: 'bruno@turnospro.test', telefono: '+5491100000002', emailVerificado: true },
+    { id: ID.p3, role: 'PROFESIONAL', nombre: 'Lic. Carla Ibáñez', email: 'carla@turnospro.test', telefono: '+5491100000003', emailVerificado: true },
+    { id: ID.c1, role: 'CLIENTE', nombre: 'Lucía Fernández', email: 'lucia@mail.test', telefono: '+5491155550101', emailVerificado: true },
+    { id: ID.c2, role: 'CLIENTE', nombre: 'Martín Gómez', email: 'martin@mail.test', telefono: '+5491155550102', emailVerificado: false },
+    { id: ID.c3, role: 'CLIENTE', nombre: 'Sofía Ruiz', email: 'sofia@mail.test', telefono: '+5491155550103', emailVerificado: true },
+  ];
+  const services = [
+    { id: ID.s1, profesionalId: ID.p1, nombre: 'Consulta general', descripcion: 'Evaluación clínica y orientación.', duracionMin: 30, precio: 18000, activo: true },
+    { id: ID.s2, profesionalId: ID.p1, nombre: 'Control anual', descripcion: 'Chequeo completo con estudios básicos.', duracionMin: 60, precio: 32000, activo: true },
+    { id: ID.s3, profesionalId: ID.p2, nombre: 'Sesión de terapia', descripcion: 'Sesión individual.', duracionMin: 45, precio: 25000, activo: true },
+    { id: ID.s4, profesionalId: ID.p2, nombre: 'Evaluación inicial', descripcion: 'Primera entrevista y plan de trabajo.', duracionMin: 60, precio: 30000, activo: true },
+    { id: ID.s5, profesionalId: ID.p3, nombre: 'Asesoría nutricional', descripcion: 'Seguimiento y ajustes.', duracionMin: 30, precio: 15000, activo: true },
+    { id: ID.s6, profesionalId: ID.p3, nombre: 'Plan alimentario', descripcion: 'Diseño de plan personalizado.', duracionMin: 45, precio: 22000, activo: true },
+  ];
+  const schedules = {
+    [ID.p1]: { days: [1, 2, 3, 4, 5], ranges: [[9 * 60, 13 * 60], [14 * 60, 18 * 60]] },
+    [ID.p2]: { days: [1, 2, 3, 4, 5], ranges: [[10 * 60, 14 * 60], [15 * 60, 19 * 60]] },
+    [ID.p3]: { days: [1, 2, 3, 4, 5], ranges: [[9 * 60, 13 * 60]] },
+  };
+  const blocks = [
+    { id: ID.b1, profesionalId: ID.p1, inicio: at(1, 12), fin: at(1, 13), motivo: 'Trámite personal' },
+    { id: ID.b2, profesionalId: ID.p2, inicio: at(2, 10), fin: at(2, 19), motivo: 'Capacitación' },
+  ];
+  return { users, services, schedules, blocks };
+}
+
+/* ============================ 6. UI COMPARTIDA ============================ */
+const AppCtx = createContext(null);
+const useApp = () => useContext(AppCtx);
+
+const ICONS = {
+  calendar: <><rect width="18" height="18" x="3" y="4" rx="2" /><path d="M16 2v4M8 2v4M3 10h18" /></>,
+  clock: <><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></>,
+  user: <><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></>,
+  x: <path d="M18 6 6 18M6 6l12 12" />,
+  check: <path d="M20 6 9 17l-5-5" />,
+  checkCircle: <><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" /><path d="m9 11 3 3L22 4" /></>,
+  ban: <><circle cx="12" cy="12" r="10" /><path d="m4.9 4.9 14.2 14.2" /></>,
+  shield: <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />,
+  chart: <><path d="M3 3v16a2 2 0 0 0 2 2h16" /><path d="M18 17V9M13 17V5M8 17v-3" /></>,
+  rotate: <><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></>,
+  alert: <><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" /><path d="M12 9v4M12 17h.01" /></>,
+  lock: <><rect width="18" height="11" x="3" y="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></>,
+  list: <path d="M3 12h.01M3 18h.01M3 6h.01M8 12h13M8 18h13M8 6h13" />,
+  left: <path d="m15 18-6-6 6-6" />,
+  right: <path d="m9 18 6-6-6-6" />,
+  info: <><circle cx="12" cy="12" r="10" /><path d="M12 16v-4M12 8h.01" /></>,
+  server: <><rect width="20" height="8" x="2" y="2" rx="2" /><rect width="20" height="8" x="2" y="14" rx="2" /><path d="M6 6h.01M6 18h.01" /></>,
+};
+function Icon({ name, size = 16, className = '' }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">{ICONS[name]}</svg>
+  );
+}
+
+const btn = 'inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed';
+const btnPrimary = `${btn} bg-indigo-600 text-white hover:bg-indigo-700`;
+const btnGhost = `${btn} border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800`;
+const btnDanger = `${btn} bg-red-600 text-white hover:bg-red-700`;
+const card = 'rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-sm';
+const inputCls = 'w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500';
+const muted = 'text-slate-500 dark:text-slate-400';
+
+const ESTADO = {
+  CONFIRMADO: { cls: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/50 dark:text-indigo-200', icon: 'calendar' },
+  COMPLETADO: { cls: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-200', icon: 'checkCircle' },
+  CANCELADO: { cls: 'bg-red-100 text-red-800 dark:bg-red-900/50 dark:text-red-200', icon: 'ban' },
+  AUSENTE: { cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/50 dark:text-amber-200', icon: 'alert' },
+};
+function Badge({ estado }) {
+  const e = ESTADO[estado];
+  return <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold ${e.cls}`}><Icon name={e.icon} size={12} />{estado}</span>;
+}
+
+function Modal({ title, onClose, children, wide }) {
+  useEffect(() => {
+    const h = (e) => e.key === 'Escape' && onClose();
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 sm:p-4" role="dialog" aria-modal="true" aria-label={title}
+      onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className={`${card} w-full ${wide ? 'sm:max-w-2xl' : 'sm:max-w-lg'} max-h-[92vh] overflow-y-auto rounded-b-none sm:rounded-b-xl`}>
+        <div className="flex items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-700 px-5 py-3 sticky top-0 bg-white dark:bg-slate-900 z-10">
+          <h2 className="font-semibold">{title}</h2>
+          <button className="rounded-md p-1 hover:bg-slate-100 dark:hover:bg-slate-800" onClick={onClose} aria-label="Cerrar"><Icon name="x" /></button>
+        </div>
+        <div className="p-5">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, error, children }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-300">{label}</span>
+      {children}
+      {error && <span className="mt-1 block text-xs text-red-600 dark:text-red-400">{error}</span>}
+    </label>
+  );
+}
+function Notice({ tone = 'info', icon = 'info', children }) {
+  const tones = {
+    info: 'bg-sky-50 text-sky-900 border-sky-200 dark:bg-sky-950/40 dark:text-sky-100 dark:border-sky-900',
+    warn: 'bg-amber-50 text-amber-900 border-amber-200 dark:bg-amber-950/40 dark:text-amber-100 dark:border-amber-900',
+    error: 'bg-red-50 text-red-900 border-red-200 dark:bg-red-950/40 dark:text-red-100 dark:border-red-900',
+    ok: 'bg-emerald-50 text-emerald-900 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-100 dark:border-emerald-900',
+  };
+  return <div className={`flex gap-2 rounded-lg border px-3 py-2 text-sm ${tones[tone]}`}><Icon name={icon} size={16} className="mt-0.5 shrink-0" /><div>{children}</div></div>;
+}
+function ErrorNotice({ error }) {
+  return <Notice tone="error" icon="alert"><b className="font-mono">{error.code}</b>{error.http ? <span className="font-mono"> · HTTP {error.http}</span> : null} · {error.message}</Notice>;
+}
+function Toasts({ toasts }) {
+  return (
+    <div className="fixed bottom-4 right-4 left-4 sm:left-auto z-[60] flex flex-col gap-2 sm:w-96" aria-live="polite">
+      {toasts.map((t) => (
+        <div key={t.id} className={`rounded-lg border px-4 py-3 text-sm shadow-lg ${t.type === 'error'
+          ? 'bg-red-50 border-red-300 text-red-900 dark:bg-red-950 dark:border-red-800 dark:text-red-100'
+          : t.type === 'info' ? 'bg-sky-50 border-sky-300 text-sky-900 dark:bg-sky-950 dark:border-sky-800 dark:text-sky-100'
+          : 'bg-emerald-50 border-emerald-300 text-emerald-900 dark:bg-emerald-950 dark:border-emerald-800 dark:text-emerald-100'}`}>
+          {t.code && <div className="font-mono text-xs font-bold mb-0.5">{t.code}{t.http ? ` · HTTP ${t.http}` : ''}</div>}
+          {t.text}
+        </div>
+      ))}
+    </div>
+  );
+}
+function FueraDeContrato({ children }) {
+  return <Notice tone="warn" icon="lock">{children} <span className={muted}>(fuera del contrato v2.0.0: spec §11.6, D-07, D-08)</span></Notice>;
+}
+
+/* ============================ 7. VISTA CLIENTE ============================ */
+function BookingModal({ svc, inicio, onClose }) {
+  const { state, call, clientId, toast } = useApp();
+  const me = userOf(state, clientId);
+  const prof = userOf(state, svc.profesionalId);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(null);
+  const [sim, setSim] = useState({ race: false, double: false });
+  const fin = inicio + svc.duracionMin * MIN;
+
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true);
+    if (sim.race) {
+      // Otro cliente real reserva el mismo slot un instante antes: el Backend debe rechazar el mío.
+      const other = state.users.find((u) => u.role === 'CLIENTE' && u.id !== clientId && u.emailVerificado);
+      const r = await call(() => Api.reservar(other.id, svc.id, inicio), { silent: true, refresh: false });
+      if (r.ok) toast('info', `${other.nombre} reservó este horario un instante antes que vos.`);
+    }
+    let r;
+    if (sim.double) {
+      // Doble clic: dos POST simultáneos. Exactamente uno puede confirmarse (INV-02).
+      const [a, b] = await Promise.all([1, 2].map(() => call(() => Api.reservar(clientId, svc.id, inicio), { silent: true })));
+      r = a.ok ? a : b;
+      const otro = a.ok ? b : a;
+      if (r.ok && !otro.ok) toast('info', `El segundo envío fue rechazado: ${otro.error.code}.`);
+      if (!r.ok) r = a;
+    } else {
+      r = await call(() => Api.reservar(clientId, svc.id, inicio), { silent: true });
+    }
+    setBusy(false);
+    if (r.ok) { setDone(turnoDeApi(r.data, state.users)); setError(null); } else setError(r.error);
+  };
+
+  if (done) {
+    return (
+      <Modal title="Turno confirmado" onClose={onClose}>
+        <div className="space-y-3">
+          <Notice tone="ok" icon="checkCircle">Tu reserva quedó <b>CONFIRMADA</b> y guardada en el servidor.</Notice>
+          <dl className="grid grid-cols-[auto,1fr] gap-x-4 gap-y-1 text-sm">
+            <dt className={muted}>Servicio</dt><dd>{svc.nombre}</dd>
+            <dt className={muted}>Profesional</dt><dd>{prof.nombre}</dd>
+            <dt className={muted}>Fecha</dt><dd>{fmtDateLong(done.inicio)}</dd>
+            <dt className={muted}>Horario</dt><dd>{fmtTime(done.inicio)} a {fmtTime(done.fin)} ({svc.duracionMin} min)</dd>
+            <dt className={muted}>Cancelación</dt><dd>Sin cargo hasta las {fmtTime(done.inicio - CONFIG.CANCEL_WINDOW_H * HOUR)} ({CONFIG.CANCEL_WINDOW_H} h antes)</dd>
+            <dt className={muted}>Id</dt><dd className="font-mono text-xs break-all">{done.id}</dd>
+          </dl>
+          <div className="flex justify-end gap-2"><button className={btnPrimary} onClick={onClose}>Listo</button></div>
+        </div>
+      </Modal>
+    );
+  }
+  return (
+    <Modal title="Confirmar reserva" onClose={onClose}>
+      <div className="space-y-4">
+        <div className={`${card} p-3 text-sm`}>
+          <div className="font-semibold">{svc.nombre} · {money(svc.precio)} <span className={`font-normal ${muted}`}>(referencia)</span></div>
+          <div className={muted}>{prof.nombre}</div>
+          <div>{fmtDateLong(inicio)} · {fmtTime(inicio)} a {fmtTime(fin)} ({svc.duracionMin} min)</div>
+        </div>
+        <div className={`${card} p-3 text-sm`}>
+          <div className={`text-xs font-medium ${muted}`}>Datos de contacto (perfil guardado en el servidor, RN-03)</div>
+          <div>{me.nombre} · {me.email} · {me.telefono}</div>
+        </div>
+        {error && <ErrorNotice error={error} />}
+        <Notice tone="info">Podés cancelar sin cargo hasta {CONFIG.CANCEL_WINDOW_H} horas antes del turno.</Notice>
+        <details className="text-sm">
+          <summary className="cursor-pointer font-medium">Simulaciones de auditoría (contra el servidor real)</summary>
+          <div className="mt-2 space-y-1">
+            <label className="flex items-start gap-2"><input type="checkbox" className="mt-1" checked={sim.race} onChange={(e) => setSim({ ...sim, race: e.target.checked })} />Otro cliente reserva este slot un instante antes que yo (concurrencia).</label>
+            <label className="flex items-start gap-2"><input type="checkbox" className="mt-1" checked={sim.double} onChange={(e) => setSim({ ...sim, double: e.target.checked })} />Enviar la reserva dos veces en paralelo (doble clic).</label>
+          </div>
+        </details>
+        <div className="flex justify-end gap-2">
+          <button className={btnGhost} onClick={onClose}>Volver</button>
+          <button className={btnPrimary} onClick={submit} disabled={busy}><Icon name="check" />{busy ? 'Enviando…' : 'Confirmar turno'}</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function ClientView() {
+  const { state, call, clientId, auditMode } = useApp();
+  const me = userOf(state, clientId);
+  const [svcId, setSvcId] = useState(ID.s1);
+  const [day, setDay] = useState(() => dayStart(state.now));
+  const [picked, setPicked] = useState(null);
+  const [tab, setTab] = useState('proximos');
+  const [toCancel, setToCancel] = useState(null);
+  const [ajeno, setAjeno] = useState('');
+  const svc = svcOf(state, svcId);
+  const res = computeSlots(state, svcId, day);
+  const minDate = toInputDate(state.now);
+
+  const mine = state.turnos.filter((t) => t.clienteId === clientId).sort((a, b) => a.inicio - b.inicio);
+  const proximos = mine.filter((t) => t.estado === 'CONFIRMADO');
+  const historial = mine.filter((t) => t.estado !== 'CONFIRMADO').reverse();
+  const shown = tab === 'proximos' ? proximos : historial;
+  const manana = res.slots.filter((s) => minOfDay(s.inicio) < 13 * 60), tarde = res.slots.filter((s) => minOfDay(s.inicio) >= 13 * 60);
+
+  const SlotGrid = ({ title, slots }) => slots.length === 0 ? null : (
+    <div>
+      <h4 className={`mb-2 text-xs font-semibold uppercase tracking-wide ${muted}`}>{title}</h4>
+      <div className="grid grid-cols-4 sm:grid-cols-6 gap-2">
+        {slots.map((s) => (
+          <button key={s.inicio} onClick={() => setPicked(s.inicio)}
+            className="rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-950/40 px-2 py-2 text-sm font-medium text-indigo-800 dark:text-indigo-200 hover:bg-indigo-600 hover:text-white dark:hover:bg-indigo-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 transition">
+            {fmtTime(s.inicio)}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="grid gap-6 lg:grid-cols-[1.4fr,1fr]">
+      <section className="space-y-5">
+        <div className={`${card} p-4 flex flex-wrap items-center justify-between gap-3`}>
+          <div className="text-sm">
+            <div className="font-semibold flex items-center gap-2"><Icon name="user" />{me.nombre}</div>
+            <div className={muted}>{me.email} · {me.telefono}</div>
+          </div>
+          {me.emailVerificado
+            ? <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300"><Icon name="checkCircle" size={14} />Email verificado</span>
+            : <span className="inline-flex items-center gap-1 text-xs font-semibold text-amber-700 dark:text-amber-300" title="La verificación de email (F-01) está fuera del contrato v2.0.0: el servidor responderá EMAIL_NOT_VERIFIED."><Icon name="alert" size={14} />Email sin verificar</span>}
+        </div>
+
+        <div className={`${card} p-4`}>
+          <h2 className="font-semibold mb-3">1. Elegí un servicio</h2>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {state.services.map((s) => (
+              <button key={s.id} disabled={!s.activo} onClick={() => setSvcId(s.id)}
+                className={`text-left rounded-lg border p-3 text-sm transition disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${svcId === s.id ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950/40' : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800'}`}>
+                <div className="font-medium">{s.nombre} {!s.activo && <span className="text-xs text-red-600">(no disponible)</span>}</div>
+                <div className={muted}>{userOf(state, s.profesionalId).nombre}</div>
+                <div className="mt-1 flex justify-between text-xs"><span className="inline-flex items-center gap-1"><Icon name="clock" size={12} />{s.duracionMin} min</span><span>{money(s.precio)}</span></div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className={`${card} p-4 space-y-4`}>
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <h2 className="font-semibold">2. Elegí fecha y horario</h2>
+            <div className="flex items-center gap-2">
+              <button className={btnGhost} aria-label="Día anterior" onClick={() => setDay(addDays(day, -1))}><Icon name="left" /></button>
+              <input type="date" className={`${inputCls} w-auto`} min={minDate} value={toInputDate(day)}
+                onChange={(e) => e.target.value && setDay(fromInputDate(e.target.value))} aria-label="Fecha" />
+              <button className={btnGhost} aria-label="Día siguiente" onClick={() => setDay(addDays(day, 1))}><Icon name="right" /></button>
+            </div>
+          </div>
+          <p className={`text-sm ${muted}`}>{fmtDateLong(day)} · {svc.nombre} ({svc.duracionMin} min) con {userOf(state, svc.profesionalId).nombre}</p>
+          {res.error && <Notice tone="error" icon="alert"><b className="font-mono">{res.error.code}</b> · {res.error.message}</Notice>}
+          {!res.error && res.slots.length === 0 && <Notice tone="warn">No hay horarios libres para este día. Probá con otra fecha.</Notice>}
+          <SlotGrid title="Mañana" slots={manana} />
+          <SlotGrid title="Tarde" slots={tarde} />
+          <p className={`text-xs ${muted}`}>Los horarios son orientativos: no ves las reservas de otros clientes. El servidor confirma o responde <span className="font-mono">SLOT_UNAVAILABLE</span>.</p>
+        </div>
+      </section>
+
+      <section className="space-y-4">
+        <div className={`${card} p-4`}>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-semibold">Mis turnos</h2>
+            <div className="inline-flex rounded-lg border border-slate-300 dark:border-slate-600 overflow-hidden text-sm" role="tablist">
+              {[['proximos', `Próximos (${proximos.length})`], ['historial', 'Historial']].map(([k, l]) => (
+                <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
+                  className={`px-3 py-1.5 ${tab === k ? 'bg-indigo-600 text-white' : 'hover:bg-slate-100 dark:hover:bg-slate-800'}`}>{l}</button>
+              ))}
+            </div>
+          </div>
+          {shown.length === 0 && <p className={`text-sm ${muted}`}>No hay turnos para mostrar.</p>}
+          <ul className="space-y-3">
+            {shown.map((t) => {
+              const sv = svcOf(state, t.servicioId), w = canClientCancel(t, state.now);
+              return (
+                <li key={t.id} className="rounded-lg border border-slate-200 dark:border-slate-700 p-3 text-sm">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="font-semibold">{sv ? sv.nombre : t.servicioId}</div>
+                      <div className={muted}>{userOf(state, t.profesionalId)?.nombre}</div>
+                    </div>
+                    <Badge estado={t.estado} />
+                  </div>
+                  <div className="mt-1">{fmtDate(t.inicio)} · {fmtTime(t.inicio)} a {fmtTime(t.fin)}</div>
+                  {t.estado === 'CANCELADO' && <div className={`text-xs ${muted}`}>Cancelado por {t.canceladoRol === 'CLIENTE' ? 'vos' : t.canceladoRol === 'ADMIN' ? 'la administración' : 'el profesional'}{t.motivo ? ` · ${t.motivo}` : ''}</div>}
+                  {t.estado === 'CONFIRMADO' && (
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                      <span className={`text-xs ${w.ok ? muted : 'text-amber-700 dark:text-amber-300'}`}>
+                        {w.ok ? `Cancelable hasta las ${fmtTime(t.inicio - CONFIG.CANCEL_WINDOW_H * HOUR)} (faltan ${fmtDur(t.inicio - state.now)})` : w.reason}
+                      </span>
+                      <button className={btnGhost} disabled={!w.ok && !auditMode} title={w.ok ? 'Cancelar turno' : w.reason}
+                        onClick={() => setToCancel(t)}>{w.ok || auditMode ? <Icon name="ban" /> : <Icon name="lock" />}Cancelar</button>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+
+        {auditMode && (
+          <div className={`${card} p-4 border-dashed space-y-2`}>
+            <h3 className="font-semibold text-sm flex items-center gap-2"><Icon name="shield" />Turno ajeno (bypass de UI)</h3>
+            <p className={`text-xs ${muted}`}>Pegá el id de un turno de otro cliente (lo ves en la vista Administrador). El servidor responde 404 (RBAC-02).</p>
+            <div className="flex gap-2">
+              <input className={`${inputCls} font-mono text-xs`} value={ajeno} onChange={(e) => setAjeno(e.target.value.trim())} placeholder="id del turno" aria-label="Id de turno ajeno" />
+              <button className={btnGhost} disabled={!ajeno} onClick={() => call(() => Api.cancelar(clientId, ajeno))}>Intentar cancelar</button>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {picked && <BookingModal svc={svc} inicio={picked} onClose={() => setPicked(null)} />}
+      {toCancel && (
+        <Modal title="Cancelar turno" onClose={() => setToCancel(null)}>
+          <div className="space-y-4 text-sm">
+            <p>¿Cancelar <b>{svcOf(state, toCancel.servicioId)?.nombre}</b> del <b>{fmtDT(toCancel.inicio)}</b>? El horario quedará libre para otros clientes.</p>
+            <div className="flex justify-end gap-2">
+              <button className={btnGhost} onClick={() => setToCancel(null)}>Volver</button>
+              <button className={btnDanger} onClick={async () => { const id = toCancel.id; setToCancel(null); await call(() => Api.cancelar(clientId, id), { success: 'Turno cancelado.' }); }}>Sí, cancelar</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ============================ 8. VISTA ADMINISTRADOR ============================ */
+function TurnoDetail({ turnoId, actor, onClose }) {
+  const { state, call, auditMode } = useApp();
+  const t = state.turnos.find((x) => x.id === turnoId);
+  const [motivo, setMotivo] = useState('');
+  const [cancelling, setCancelling] = useState(false);
+  const [error, setError] = useState(null);
+  if (!t) return null;
+  const sv = svcOf(state, t.servicioId), cli = userOf(state, t.clienteId), prof = userOf(state, t.profesionalId);
+  const visible = inScope(actor, t.profesionalId);
+  const canCancel = t.estado === 'CONFIRMADO' && state.now < t.inicio;
+  const cancelar = async () => {
+    const r = await call(() => Api.cancelar(actor.id, t.id, motivo), { success: 'Turno cancelado.', silent: true });
+    if (r.ok) onClose(); else setError(r.error);
+  };
+  return (
+    <Modal title="Turno" onClose={onClose}>
+      <div className="space-y-4 text-sm">
+        <div className="flex items-center justify-between"><div className="font-semibold">{sv?.nombre}</div><Badge estado={t.estado} /></div>
+        <dl className="grid grid-cols-[auto,1fr] gap-x-4 gap-y-1">
+          <dt className={muted}>Id</dt><dd className="font-mono text-xs break-all">{t.id}</dd>
+          <dt className={muted}>Profesional</dt><dd>{prof?.nombre}</dd>
+          <dt className={muted}>Horario</dt><dd>{fmtDate(t.inicio)} · {fmtTime(t.inicio)} a {fmtTime(t.fin)}</dd>
+          <dt className={muted}>Cliente</dt><dd>{visible ? cli?.nombre : <i>Sin acceso (RBAC-04)</i>}</dd>
+          <dt className={muted}>Contacto</dt><dd>{visible && cli ? `${cli.email} · ${cli.telefono}` : <i>Sin acceso (RBAC-04)</i>}</dd>
+          {t.estado === 'CANCELADO' && <><dt className={muted}>Cancelación</dt><dd>{t.canceladoRol}{t.motivo ? ` · ${t.motivo}` : ''}</dd></>}
+        </dl>
+        {error && <ErrorNotice error={error} />}
+        {cancelling ? (
+          <div className="space-y-3">
+            {canCancel && t.inicio - state.now < CONFIG.CANCEL_WINDOW_H * HOUR && <Notice tone="warn">Faltan menos de {CONFIG.CANCEL_WINDOW_H} h: se aplica la excepción de RN-01 para Administrador/Profesional.</Notice>}
+            <Field label="Motivo de la cancelación (obligatorio)"><textarea className={inputCls} rows={3} value={motivo} onChange={(e) => setMotivo(e.target.value)} autoFocus /></Field>
+            <div className="flex justify-end gap-2">
+              <button className={btnGhost} onClick={() => setCancelling(false)}>Volver</button>
+              <button className={btnDanger} onClick={cancelar}>Cancelar turno</button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="flex flex-wrap justify-end gap-2">
+              <button className={btnGhost} disabled title="Cerrar turnos como COMPLETADO/AUSENTE está fuera del contrato v2.0.0 (spec §11.6)"><Icon name="checkCircle" />Completar</button>
+              <button className={btnGhost} disabled title="Cerrar turnos como COMPLETADO/AUSENTE está fuera del contrato v2.0.0 (spec §11.6)"><Icon name="alert" />Ausente</button>
+              <button className={btnDanger} disabled={!canCancel && !auditMode} title={canCancel ? '' : 'Solo antes del inicio'} onClick={() => setCancelling(true)}><Icon name="ban" />Cancelar…</button>
+            </div>
+            <p className={`text-xs ${muted}`}>Completar y Ausente quedan deshabilitados: no tienen endpoint en el contrato v2.0.0 (spec §11.6).</p>
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function TurnoCard({ t, actor, onOpen, showProf }) {
+  const { state } = useApp();
+  const sv = svcOf(state, t.servicioId), visible = inScope(actor, t.profesionalId);
+  return (
+    <button onClick={() => onOpen(t.id)} className={`w-full text-left rounded-lg border p-2 text-xs transition hover:ring-2 hover:ring-indigo-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${t.estado === 'CANCELADO' ? 'opacity-60' : ''} border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800`}>
+      <div className="flex items-center justify-between gap-1"><span className="font-semibold">{fmtTime(t.inicio)}–{fmtTime(t.fin)}</span><Badge estado={t.estado} /></div>
+      <div className="mt-0.5">{sv?.nombre}</div>
+      <div className={muted}>{visible ? userOf(state, t.clienteId)?.nombre : 'Fuera de tu alcance'}{showProf ? ` · ${userOf(state, t.profesionalId)?.nombre}` : ''}</div>
+    </button>
+  );
+}
+
+function AdminAgenda({ actor, scopeIds }) {
+  const { state } = useApp();
+  const [mode, setMode] = useState('semana');
+  const [anchor, setAnchor] = useState(() => dayStart(state.now));
+  const [estadoF, setEstadoF] = useState('TODOS');
+  const [open, setOpen] = useState(null);
+  const turnos = state.turnos.filter((t) => scopeIds.includes(t.profesionalId)).sort((a, b) => a.inicio - b.inicio);
+  const blocks = state.blocks.filter((b) => scopeIds.includes(b.profesionalId));
+  const days = mode === 'semana' ? Array.from({ length: 7 }, (_, i) => addDays(weekStart(anchor), i)) : [dayStart(anchor)];
+  const step = mode === 'semana' ? 7 : 1;
+  const showProf = scopeIds.length > 1;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="inline-flex rounded-lg border border-slate-300 dark:border-slate-600 overflow-hidden text-sm">
+          {[['semana', 'Semana'], ['dia', 'Día'], ['lista', 'Lista']].map(([k, l]) => (
+            <button key={k} aria-pressed={mode === k} onClick={() => setMode(k)} className={`px-3 py-1.5 ${mode === k ? 'bg-indigo-600 text-white' : 'hover:bg-slate-100 dark:hover:bg-slate-800'}`}>{l}</button>
+          ))}
+        </div>
+        {mode !== 'lista' ? (
+          <>
+            <button className={btnGhost} aria-label="Anterior" onClick={() => setAnchor(addDays(anchor, -step))}><Icon name="left" /></button>
+            <button className={btnGhost} onClick={() => setAnchor(dayStart(state.now))}>Hoy</button>
+            <button className={btnGhost} aria-label="Siguiente" onClick={() => setAnchor(addDays(anchor, step))}><Icon name="right" /></button>
+            <span className="text-sm font-medium">{mode === 'semana' ? `${fmtDate(days[0])} – ${fmtDate(days[6])}` : fmtDateLong(days[0])}</span>
+          </>
+        ) : (
+          <select className={`${inputCls} w-auto`} value={estadoF} onChange={(e) => setEstadoF(e.target.value)} aria-label="Filtrar por estado">
+            {['TODOS', 'CONFIRMADO', 'COMPLETADO', 'CANCELADO', 'AUSENTE'].map((e) => <option key={e}>{e}</option>)}
+          </select>
+        )}
+      </div>
+
+      {mode === 'lista' ? (
+        <div className="space-y-2">
+          {turnos.filter((t) => estadoF === 'TODOS' || t.estado === estadoF).map((t) => (
+            <div key={t.id} className="flex items-center gap-3"><span className={`w-28 shrink-0 text-xs ${muted}`}>{fmtDate(t.inicio)}</span><div className="flex-1"><TurnoCard t={t} actor={actor} onOpen={setOpen} showProf={showProf} /></div></div>
+          ))}
+          {turnos.length === 0 && <p className={`text-sm ${muted}`}>Sin turnos.</p>}
+        </div>
+      ) : (
+        <div className={`grid gap-3 ${mode === 'semana' ? 'md:grid-cols-4 xl:grid-cols-7' : ''}`}>
+          {days.map((d) => {
+            const items = turnos.filter((t) => dayStart(t.inicio) === d);
+            const bl = blocks.filter((b) => overlaps(d, addDays(d, 1), b.inicio, b.fin));
+            const isToday = d === dayStart(state.now);
+            return (
+              <div key={d} className={`${card} p-2 min-h-[8rem] ${isToday ? 'ring-2 ring-indigo-400' : ''}`}>
+                <div className={`mb-2 text-xs font-semibold ${isToday ? 'text-indigo-600 dark:text-indigo-300' : muted}`}>{fmtDate(d)}{isToday && ' · hoy'}</div>
+                <div className="space-y-2">
+                  {bl.map((b) => (
+                    <div key={b.id} className="hatch rounded-lg border border-slate-300 dark:border-slate-600 p-2 text-xs">
+                      <div className="font-semibold flex items-center gap-1"><Icon name="lock" size={12} />Bloqueo</div>
+                      <div>{fmtTime(Math.max(b.inicio, d))}–{b.fin >= addDays(d, 1) ? '24:00' : fmtTime(b.fin)} · {b.motivo}</div>
+                      {showProf && <div className={muted}>{userOf(state, b.profesionalId).nombre}</div>}
+                    </div>
+                  ))}
+                  {items.map((t) => <TurnoCard key={t.id} t={t} actor={actor} onOpen={setOpen} showProf={showProf} />)}
+                  {!items.length && !bl.length && <p className={`text-xs ${muted}`}>Sin turnos</p>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {open && <TurnoDetail turnoId={open} actor={actor} onClose={() => setOpen(null)} />}
+    </div>
+  );
+}
+
+function Stat({ label, value, sub }) {
+  return <div className={`${card} p-3`}><div className={`text-xs ${muted}`}>{label}</div><div className="text-2xl font-bold">{value}</div>{sub && <div className={`text-xs ${muted}`}>{sub}</div>}</div>;
+}
+const pct = (x) => `${Math.round(x * 100)}%`;
+
+function AdminMetrics({ scopeIds }) {
+  const { state } = useApp();
+  const [period, setPeriod] = useState('semana');
+  const m = useMemo(() => computeMetrics(state, scopeIds, period), [state, scopeIds, period]);
+  const maxDay = Math.max(1, ...m.perDay.map((x) => x.n));
+  const maxTop = Math.max(1, ...m.top.map((x) => x.n));
+  return (
+    <div className="space-y-4">
+      <div className="inline-flex rounded-lg border border-slate-300 dark:border-slate-600 overflow-hidden text-sm">
+        {[['semana', 'Semana actual'], ['mes', 'Mes actual'], ['todo', 'Todo']].map(([k, l]) => (
+          <button key={k} aria-pressed={period === k} onClick={() => setPeriod(k)} className={`px-3 py-1.5 ${period === k ? 'bg-indigo-600 text-white' : 'hover:bg-slate-100 dark:hover:bg-slate-800'}`}>{l}</button>
+        ))}
+      </div>
+      <p className={`text-xs ${muted}`}>Calculadas en el navegador con los turnos que devuelve el servidor (no hay endpoint de métricas en v2.0.0, D-08).</p>
+      <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
+        <Stat label="Turnos en el período" value={m.total} sub={`${m.confirmados} confirmados · ${m.completados} completados`} />
+        <Stat label="Tasa de cancelación" value={pct(m.tasaCancel)} sub={`Cliente ${m.cancelPorRol.CLIENTE} · Prof. ${m.cancelPorRol.PROFESIONAL} · Admin ${m.cancelPorRol.ADMIN}`} />
+        <Stat label="Tasa de ausentismo" value={pct(m.tasaAusent)} sub={`${m.ausentes} ausentes sobre ${m.completados + m.ausentes} cerrados`} />
+        <Stat label="Ocupación" value={pct(m.ocupacion)} sub={`${Math.round(m.bookedMin)} de ${Math.round(m.availMin)} min`} />
+      </div>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className={`${card} p-4`}>
+          <h3 className="font-semibold mb-3 text-sm">Turnos por día (sin cancelados)</h3>
+          {m.perDay.length > 62 ? <p className={`text-sm ${muted}`}>Período demasiado largo para graficar.</p> : (
+            <div className="flex items-end gap-1 h-32">
+              {m.perDay.map((x) => (
+                <div key={x.day} className="flex-1 flex flex-col items-center justify-end gap-1 min-w-0" title={`${fmtDate(x.day)}: ${x.n}`}>
+                  <span className="text-[10px]">{x.n || ''}</span>
+                  <div className="w-full rounded-t bg-indigo-500" style={{ height: `${(x.n / maxDay) * 100}%`, minHeight: x.n ? 4 : 1 }} />
+                  <span className={`text-[9px] ${muted}`}>{new Date(x.day).getDate()}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className={`${card} p-4`}>
+          <h3 className="font-semibold mb-3 text-sm">Servicios más reservados</h3>
+          {m.top.length === 0 && <p className={`text-sm ${muted}`}>Sin datos.</p>}
+          <ul className="space-y-2">
+            {m.top.map((x) => (
+              <li key={x.svc.id} className="text-sm">
+                <div className="flex justify-between"><span>{x.svc.nombre}</span><span className="font-semibold">{x.n}</span></div>
+                <div className="h-2 rounded bg-slate-200 dark:bg-slate-700"><div className="h-2 rounded bg-indigo-500" style={{ width: `${(x.n / maxTop) * 100}%` }} /></div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminBlocks({ scopeIds }) {
+  const { state } = useApp();
+  const blocks = state.blocks.filter((b) => scopeIds.includes(b.profesionalId)).sort((a, b) => a.inicio - b.inicio);
+  return (
+    <div className="space-y-4">
+      <FueraDeContrato>Crear y eliminar bloqueos (F-09) no tiene endpoint todavía: la lista es la de la semilla, solo lectura.</FueraDeContrato>
+      <div className={`${card} p-4`}>
+        <h3 className="font-semibold mb-3">Bloqueos vigentes</h3>
+        {blocks.length === 0 && <p className={`text-sm ${muted}`}>No hay bloqueos.</p>}
+        <ul className="space-y-2">
+          {blocks.map((b) => (
+            <li key={b.id} className="hatch rounded-lg border border-slate-300 dark:border-slate-600 p-3 text-sm">
+              <div className="font-semibold">{b.motivo}</div><div>{fmtDT(b.inicio)} → {fmtDT(b.fin)}</div><div className={`text-xs ${muted}`}>{userOf(state, b.profesionalId).nombre}</div>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function AdminServices({ scopeIds }) {
+  const { state } = useApp();
+  return (
+    <div className="space-y-4">
+      <FueraDeContrato>Activar y desactivar servicios (F-07) no tiene endpoint todavía: solo lectura.</FueraDeContrato>
+      <div className={`${card} p-4`}>
+        <h3 className="font-semibold mb-3">Servicios</h3>
+        <ul className="divide-y divide-slate-200 dark:divide-slate-700">
+          {state.services.filter((s) => scopeIds.includes(s.profesionalId)).map((s) => (
+            <li key={s.id} className="py-2 text-sm">
+              <div className="font-medium">{s.nombre} <span className={`text-xs ${s.activo ? 'text-emerald-600' : 'text-red-600'}`}>{s.activo ? 'Activo' : 'Inactivo'}</span></div>
+              <div className={`text-xs ${muted}`}>{userOf(state, s.profesionalId).nombre} · {s.duracionMin} min · {money(s.precio)}</div>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function AdminAudit() {
+  return (
+    <div className="space-y-4">
+      <FueraDeContrato>La auditoría (RN-08) se guarda en la tabla <span className="font-mono">auditoria_evento</span> en la misma transacción que cada reserva o cancelación, pero no hay endpoint para leerla.</FueraDeContrato>
+      <div className={`${card} p-4 text-sm`}>
+        <p>Para verla, consultá la base desde <span className="font-mono">backend/</span>:</p>
+        <pre className="mt-2 overflow-x-auto rounded bg-slate-100 dark:bg-slate-800 p-2 text-xs">sqlite3 turnos.db "SELECT ocurrido_en, rol, accion, detalle FROM auditoria_evento ORDER BY rowid DESC LIMIT 20;"</pre>
+      </div>
+    </div>
+  );
+}
+
+function AdminView() {
+  const { state, adminId } = useApp();
+  const actorUser = userOf(state, adminId);
+  const actor = { id: actorUser.id, role: actorUser.role };
+  const profs = state.users.filter((u) => u.role === 'PROFESIONAL');
+  const [tab, setTab] = useState('agenda');
+  const [profF, setProfF] = useState('all');
+  const scopeIds = useMemo(() => (actor.role === 'ADMIN' ? (profF === 'all' ? profs.map((p) => p.id) : [profF]) : [actor.id]), [actor.role, actor.id, profF]);
+  const tabs = [['agenda', 'Agenda', 'calendar'], ['metricas', 'Métricas', 'chart'], ['bloqueos', 'Bloqueos', 'lock'], ['servicios', 'Servicios', 'list'], ['auditoria', 'Auditoría', 'shield']];
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Notice tone="info" icon="shield">Actuando como <b>{actorUser.nombre}</b> ({actor.role}). {actor.role === 'ADMIN' ? 'El servidor devuelve todas las agendas.' : 'El servidor devuelve solo tu agenda (RBAC-01).'}</Notice>
+        {actor.role === 'ADMIN' && (
+          <select className={`${inputCls} w-auto`} value={profF} onChange={(e) => setProfF(e.target.value)} aria-label="Filtrar profesional">
+            <option value="all">Todos los profesionales</option>
+            {profs.map((p) => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+          </select>
+        )}
+      </div>
+      <div className="flex gap-1 overflow-x-auto border-b border-slate-200 dark:border-slate-700" role="tablist">
+        {tabs.map(([k, l, ic]) => (
+          <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
+            className={`inline-flex items-center gap-1.5 whitespace-nowrap px-3 py-2 text-sm font-medium border-b-2 -mb-px ${tab === k ? 'border-indigo-600 text-indigo-700 dark:text-indigo-300' : 'border-transparent hover:bg-slate-100 dark:hover:bg-slate-800'}`}><Icon name={ic} />{l}</button>
+        ))}
+      </div>
+      {tab === 'agenda' && <AdminAgenda actor={actor} scopeIds={scopeIds} />}
+      {tab === 'metricas' && <AdminMetrics scopeIds={scopeIds} />}
+      {tab === 'bloqueos' && <AdminBlocks scopeIds={scopeIds} />}
+      {tab === 'servicios' && <AdminServices scopeIds={scopeIds} />}
+      {tab === 'auditoria' && <AdminAudit />}
+    </div>
+  );
+}
+
+/* ============================ 9. APP ============================ */
+function App() {
+  const [local] = useState(() => makeLocalData());
+  const [now, setNow] = useState(() => Date.now());
+  const [turnos, setTurnos] = useState([]);
+  const [conexion, setConexion] = useState('cargando'); // cargando | ok | offline
+  const [view, setView] = useState('cliente');
+  const [clientId, setClientId] = useState(ID.c1);
+  const [adminId, setAdminId] = useState(ID.admin);
+  const [auditMode, setAuditMode] = useState(false);
+  const [toasts, setToasts] = useState([]);
+  const viewerId = view === 'cliente' ? clientId : adminId;
+
+  // Reloj real: el Backend usa la hora UTC real (plan §3.1). No hay reloj simulado.
+  useEffect(() => { const h = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(h); }, []);
+
+  const toast = useCallback((type, text, code, http) => {
+    const id = Math.random();
+    setToasts((t) => [...t, { id, type, text, code, http }]);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 6000);
+  }, []);
+
+  // GET /api/turnos al iniciar, al cambiar de usuario y después de cada acción (plan §3.1).
+  // Si el servidor no responde NO se vuelve a datos en memoria (plan §2): se vacía la lista.
+  const refresh = useCallback(async () => {
+    try {
+      const data = await Api.listarTurnos(viewerId);
+      setTurnos(data.map((t) => turnoDeApi(t, local.users)));
+      setConexion('ok');
+    } catch (e) {
+      setTurnos([]);
+      if (e.code === 'OFFLINE') setConexion('offline');
+      else toast('error', e.message, e.code, e.http);
+    }
+    setNow(Date.now());
+  }, [viewerId, local.users, toast]);
+  useEffect(() => { setConexion('cargando'); refresh(); }, [refresh]);
+
+  // Ejecuta una llamada a la API y muestra el resultado que decide el servidor.
+  const call = async (fn, opts = {}) => {
+    let r;
+    try { r = { ok: true, data: await fn() }; if (opts.success) toast('ok', opts.success); }
+    catch (e) {
+      r = { ok: false, error: e };
+      if (e.code === 'OFFLINE') setConexion('offline');
+      if (!opts.silent) toast('error', e.message, e.code, e.http);
+    }
+    if (opts.refresh !== false) await refresh();
+    return r;
+  };
+
+  const state = { ...local, now, turnos };
+  const clients = local.users.filter((u) => u.role === 'CLIENTE');
+  const staff = local.users.filter((u) => u.role !== 'CLIENTE');
+  const ctx = { state, call, toast, clientId, adminId, auditMode };
+
+  return (
+    <AppCtx.Provider value={ctx}>
+      <header className="sticky top-0 z-40 border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-slate-900/95 backdrop-blur">
+        <div className="mx-auto max-w-7xl px-4 py-3 flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2 font-bold text-indigo-700 dark:text-indigo-300"><Icon name="calendar" size={20} />Turnos Pro</div>
+          <div className="inline-flex rounded-lg border border-slate-300 dark:border-slate-600 overflow-hidden text-sm" role="group" aria-label="Rol">
+            {[['cliente', 'Vista Cliente', 'user'], ['admin', 'Vista Administrador', 'shield']].map(([k, l, ic]) => (
+              <button key={k} aria-pressed={view === k} onClick={() => setView(k)}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 font-medium ${view === k ? 'bg-indigo-600 text-white' : 'hover:bg-slate-100 dark:hover:bg-slate-800'}`}><Icon name={ic} />{l}</button>
+            ))}
+          </div>
+          {view === 'cliente'
+            ? <select className={`${inputCls} w-auto`} value={clientId} onChange={(e) => setClientId(e.target.value)} aria-label="Cliente activo">
+                {clients.map((c) => <option key={c.id} value={c.id}>{c.nombre}{c.emailVerificado ? '' : ' (email sin verificar)'}</option>)}
+              </select>
+            : <select className={`${inputCls} w-auto`} value={adminId} onChange={(e) => setAdminId(e.target.value)} aria-label="Usuario administrador activo">
+                {staff.map((c) => <option key={c.id} value={c.id}>{c.nombre} · {c.role}</option>)}
+              </select>}
+          <label className="inline-flex items-center gap-2 text-sm cursor-pointer" title="Habilita los botones que la UI normalmente deshabilita, para comprobar que el servidor igualmente rechaza la acción">
+            <input type="checkbox" checked={auditMode} onChange={(e) => setAuditMode(e.target.checked)} />Modo auditoría
+          </label>
+        </div>
+        <div className="border-t border-slate-100 dark:border-slate-800">
+          <div className="mx-auto max-w-7xl px-4 py-2 flex flex-wrap items-center gap-2 text-sm">
+            <span className="inline-flex items-center gap-1.5 font-medium"><Icon name="clock" />Hora real: {fmtDT(now)}</span>
+            <span className={`text-xs ${muted}`}>(el reloj simulado de la Fase 1 no aplica: el servidor usa la hora real)</span>
+            <span className="ml-auto flex items-center gap-2">
+              <span className={`inline-flex items-center gap-1.5 text-xs font-semibold ${conexion === 'ok' ? 'text-emerald-700 dark:text-emerald-300' : conexion === 'offline' ? 'text-red-700 dark:text-red-300' : muted}`}>
+                <Icon name="server" size={14} />{conexion === 'ok' ? `Conectado a ${API_BASE}` : conexion === 'offline' ? 'Sin conexión' : 'Conectando…'}
+              </span>
+              <button className={btnGhost} onClick={refresh}><Icon name="rotate" />Recargar</button>
+            </span>
+          </div>
+        </div>
+      </header>
+      <main className="mx-auto max-w-7xl px-4 py-6 space-y-4">
+        {conexion === 'offline' && (
+          <Notice tone="error" icon="alert">
+            <b>Sin conexión con el servidor</b> ({API_BASE}). Los turnos no se muestran ni se pueden reservar hasta que vuelva la conexión.
+            Levantá el backend con <span className="font-mono">python -m uvicorn main:app --port 8000</span> desde <span className="font-mono">backend/</span>.
+            <div className="mt-2"><button className={btnGhost} onClick={refresh}><Icon name="rotate" />Reintentar</button></div>
+          </Notice>
+        )}
+        {view === 'cliente' ? <ClientView key={clientId} /> : <AdminView key={adminId} />}
+      </main>
+      <Toasts toasts={toasts} />
+    </AppCtx.Provider>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
