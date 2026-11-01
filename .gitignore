@@ -1,0 +1,11 @@
+backend/.venv/
+venv/
+.venv/
+backend/turnos.db
+backend/turnos.db-wal
+backend/turnos.db-shm
+*.db
+__pycache__/
+.pytest_cache/
+.env
+.env.*
