@@ -1,4 +1,4 @@
-"""Configuración del backend (spec.md §1.4, RN-01, RN-04)."""
+"""Configuración del backend (spec.md §1.4, RN-01, RN-04; plan.md §3.2)."""
 import os
 from datetime import timedelta, timezone
 from pathlib import Path
@@ -14,5 +14,7 @@ GRID_MIN = 15                   # RN-04: grilla de slots
 # así que alcanza con un offset fijo y no hace falta el paquete tzdata en Windows.
 ZONA_OPERACION = timezone(timedelta(hours=-3), "ART")
 
-# Capa 2 con CORS habilitado (plan.md §8.2). Solo para desarrollo local.
-CORS_ORIGINS = ["*"]
+# CORS (plan.md §3.2): solo el frontend servido en :5500, sin comodín.
+CORS_ORIGINS = ["http://localhost:5500", "http://127.0.0.1:5500"]
+CORS_METHODS = ["GET", "POST"]
+CORS_HEADERS = ["Content-Type", "X-Usuario-Id"]

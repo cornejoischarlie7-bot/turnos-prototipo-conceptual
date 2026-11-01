@@ -1,40 +1,51 @@
-"""Modelos Pydantic del contrato HTTP (spec.md §4.1 y §11).
+"""Modelos Pydantic del contrato HTTP (spec.md §11; plan.md §3.2).
 
-Solo atributos de §4.1. Los instantes viajan como texto ISO 8601 en UTC con sufijo Z,
-tal como se guardan en la base.
+Todos con extra="forbid": un campo que el contrato no acepta (por ejemplo `fin`,
+`profesional_id` o `estado` en una reserva) es un cuerpo mal formado → 422 VALIDATION_ERROR.
 """
+import uuid
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Estado = Literal["CONFIRMADO", "CANCELADO", "COMPLETADO", "AUSENTE"]   # RN-06
-Rol = Literal["CLIENTE", "PROFESIONAL", "ADMIN"]
-Instante = str
+Instante = str   # ISO 8601 en UTC con sufijo Z (§11.1)
 
 EJ_INICIO = "2026-11-06T13:00:00Z"
 
 
 class Estricto(BaseModel):
-    """Salidas: el servidor nunca devuelve campos fuera de §4.1."""
     model_config = ConfigDict(extra="forbid")
 
 
 # ---------------------------------------------------------------- entrada
-# Tolerante a propósito: los campos faltantes o inválidos se rechazan en el servicio con
-# códigos de §7 (INVALID_TIME_RANGE, SERVICE_UNAVAILABLE), en el formato de §11.4.
-class CrearTurno(BaseModel):
-    """§11.2. fin, profesional_id y cliente_id los define el servidor."""
-    servicio_id: str | None = Field(default=None, examples=["<uuid de Servicio>"])
-    inicio: Instante | None = Field(default=None, examples=[EJ_INICIO])
+class ReservaIn(Estricto):
+    """§11.4. `fin`, `profesional_id` y `estado` los define el servidor."""
+    servicio_id: uuid.UUID = Field(examples=["<uuid de Servicio>"])
+    inicio: Instante = Field(examples=[EJ_INICIO])
+    cliente_id: uuid.UUID | None = Field(default=None, description="Solo ADMIN: reserva en nombre de un cliente.")
+
+    @field_validator("inicio")
+    @classmethod
+    def instante_con_zona(cls, v: str) -> str:
+        try:
+            d = datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError("El instante no tiene formato ISO 8601.")
+        if d.tzinfo is None:
+            raise ValueError("El instante debe incluir zona horaria (sufijo Z).")
+        return v
 
 
-class CancelarTurno(BaseModel):
-    """§11.3. Obligatorio para PROFESIONAL/ADMIN; se ignora si cancela el CLIENTE."""
-    motivo_cancelacion: str | None = Field(default=None, examples=["Imprevisto del profesional"])
+class CancelacionIn(Estricto):
+    """§11.5. Obligatorio para PROFESIONAL/ADMIN; opcional para el CLIENTE."""
+    motivo: str | None = Field(default=None, examples=["El profesional no puede asistir."])
 
 
 # ---------------------------------------------------------------- salida
 class Turno(Estricto):
+    """§11.2: exactamente los atributos de Turno en §4.1."""
     id: str
     cliente_id: str
     profesional_id: str
@@ -48,83 +59,14 @@ class Turno(Estricto):
     actualizado_en: Instante
 
 
-class Error(Estricto):
-    """§11.4. `codigo` es uno de los de §7."""
+class ErrorCuerpo(Estricto):
     codigo: str = Field(examples=["SLOT_UNAVAILABLE"])
     mensaje: str = Field(examples=["Ese horario ya fue reservado."])
-    detalles: dict[str, str] | None = None
 
 
-class Servicio(Estricto):
-    id: str
-    profesional_id: str
-    nombre: str
-    descripcion: str | None
-    duracion_min: int
-    precio_referencia: float
-    activo: bool
-
-
-class Profesional(Estricto):
-    id: str
-    nombre_completo: str
-
-
-class HorarioLaboral(Estricto):
-    id: str
-    profesional_id: str
-    dia_semana: int = Field(ge=0, le=6, description="0 = domingo … 6 = sábado")
-    hora_inicio: str
-    hora_fin: str
-
-
-class Bloqueo(Estricto):
-    id: str
-    profesional_id: str
-    inicio: Instante
-    fin: Instante
-    motivo: str | None
-
-
-class Catalogo(Estricto):
-    servicios: list[Servicio]
-    profesionales: list[Profesional]
-    horarios: list[HorarioLaboral]
-    bloqueos: list[Bloqueo] | None = Field(default=None, description="Solo para PROFESIONAL (propios) y ADMIN")
-
-
-class Slot(Estricto):
-    inicio: Instante
-    fin: Instante
-
-
-class Usuario(Estricto):
-    """Usuario de §4.1 sin password_hash."""
-    id: str
-    email: str
-    email_verificado: bool
-    nombre_completo: str
-    telefono: str
-    rol: Rol
-    activo: bool
-    creado_en: Instante
-
-
-class AuditoriaEvento(Estricto):
-    id: str
-    entidad: str
-    entidad_id: str
-    accion: str
-    actor_id: str
-    rol: Rol
-    ocurrido_en: Instante
-    detalle: str | None
-
-
-class UsuarioDev(Estricto):
-    id: str
-    nombre_completo: str
-    rol: Rol
+class Error(Estricto):
+    """§11.1: { "error": { "codigo", "mensaje" } }, con `codigo` de la §7."""
+    error: ErrorCuerpo
 
 
 def errores(*codigos: int) -> dict[int | str, dict]:

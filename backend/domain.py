@@ -4,7 +4,7 @@ Todas las fechas son datetime con zona (aware). En la base se guardan en UTC
 como texto ISO 8601 con sufijo Z, que se ordena bien como string.
 """
 import re
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 import config
 
@@ -21,6 +21,9 @@ HTTP = {
     "REASON_REQUIRED": 422,
     "FORBIDDEN": 403,
     "NOT_FOUND": 404,
+    "UNAUTHENTICATED": 401,
+    "VALIDATION_ERROR": 422,
+    "PERSISTENCE_UNAVAILABLE": 503,
 }
 
 
@@ -32,22 +35,18 @@ class ErrorDominio(Exception):
 
 
 # ---------------------------------------------------------------- tiempo
-def ahora_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def a_iso(d: datetime) -> str:
     return d.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def de_iso(s: str) -> datetime:
-    """Parsea un instante ISO 8601. Sin zona horaria es ambiguo y se rechaza (RN-04)."""
+    """Parsea un instante ISO 8601 (spec §11.1). Sin zona horaria es ambiguo y se rechaza."""
     try:
         d = datetime.fromisoformat(s)
     except (TypeError, ValueError):
-        raise ErrorDominio("INVALID_TIME_RANGE", "El instante no tiene formato ISO 8601.")
+        raise ErrorDominio("VALIDATION_ERROR", "El instante no tiene formato ISO 8601.")
     if d.tzinfo is None:
-        raise ErrorDominio("INVALID_TIME_RANGE", "El instante debe incluir zona horaria (por ejemplo, sufijo Z).")
+        raise ErrorDominio("VALIDATION_ERROR", "El instante debe incluir zona horaria (por ejemplo, sufijo Z).")
     return d.astimezone(timezone.utc)
 
 
@@ -106,7 +105,7 @@ def dentro_de_horario(inicio: datetime, fin: datetime, horarios: list[tuple[int,
 
 # ---------------------------------------------------------------- RN-01 / RN-06
 def validar_cancelacion(estado: str, inicio: datetime, ahora: datetime, rol: str, motivo: str | None) -> str | None:
-    """Valida la cancelación y devuelve el motivo a guardar (None si cancela el cliente)."""
+    """Valida la cancelación y devuelve el motivo a guardar (spec §11.5: opcional para el cliente)."""
     if estado != "CONFIRMADO":
         raise ErrorDominio("INVALID_STATE_TRANSITION", f"El turno está {estado} y no puede cancelarse.")
     if ahora >= inicio:
@@ -115,33 +114,8 @@ def validar_cancelacion(estado: str, inicio: datetime, ahora: datetime, rol: str
         if inicio - ahora < timedelta(hours=config.CANCELLATION_WINDOW_HOURS):
             raise ErrorDominio("CANCELLATION_WINDOW_EXPIRED",
                                f"No podés cancelar: faltan menos de {config.CANCELLATION_WINDOW_HOURS} horas para el turno.")
-        return None
+        return (motivo or "").strip() or None
     motivo = (motivo or "").strip()
     if not motivo:
         raise ErrorDominio("REASON_REQUIRED", "El motivo de cancelación es obligatorio.")
     return motivo
-
-
-# ---------------------------------------------------------------- F-03
-def slots_del_dia(fecha: date, duracion_min: int, horarios: list[tuple[int, str, str]],
-                  ocupados: list[tuple[datetime, datetime]], ahora: datetime) -> list[tuple[datetime, datetime]]:
-    """Slots libres de un día (fecha en zona de operación), con las reglas de RN-02, RN-04 y RN-05."""
-    tz = config.ZONA_OPERACION
-    dia = (fecha.isoweekday()) % 7
-    libres = []
-    for d, a, b in sorted(horarios, key=lambda h: h[1]):
-        if d != dia:
-            continue
-        cursor = datetime.combine(fecha, time.fromisoformat(a), tz)
-        limite = datetime.combine(fecha, time(0, 0), tz) + timedelta(days=1) if b == "24:00" \
-            else datetime.combine(fecha, time.fromisoformat(b), tz)
-        while cursor + timedelta(minutes=duracion_min) <= limite:
-            ini, fin = cursor.astimezone(timezone.utc), calcular_fin(cursor, duracion_min).astimezone(timezone.utc)
-            try:
-                validar_inicio(ini, ahora)
-                if not any(solapa(ini, fin, oi, of) for oi, of in ocupados):
-                    libres.append((ini, fin))
-            except ErrorDominio:
-                pass
-            cursor += timedelta(minutes=config.GRID_MIN)
-    return libres

@@ -1,10 +1,10 @@
 """Reglas puras de spec.md §3, sin base de datos."""
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from domain import (ErrorDominio, de_iso, dentro_de_horario, slots_del_dia, solapa, validar_cancelacion,
-                    validar_contacto, validar_inicio)
+from domain import (ErrorDominio, de_iso, dentro_de_horario, solapa, validar_cancelacion, validar_contacto,
+                    validar_inicio)
 
 UTC = timezone.utc
 AHORA = datetime(2026, 11, 4, 13, 0, tzinfo=UTC)  # miércoles 10:00 ART
@@ -30,6 +30,9 @@ class TestSolapamiento:  # RN-02
 class TestCancelacion:  # RN-01 / RN-06
     def test_cliente_justo_2h_puede(self):
         assert validar_cancelacion("CONFIRMADO", AHORA + 2 * H, AHORA, "CLIENTE", None) is None
+
+    def test_cliente_motivo_opcional(self):
+        assert validar_cancelacion("CONFIRMADO", AHORA + 3 * H, AHORA, "CLIENTE", " Me surgió algo ") == "Me surgió algo"
 
     def test_cliente_1h59_no_puede(self):
         with pytest.raises(ErrorDominio) as e:
@@ -80,8 +83,9 @@ class TestInicio:  # RN-04
         assert e.value.codigo == "INVALID_TIME_RANGE"
 
     def test_sin_zona_horaria(self):
-        with pytest.raises(ErrorDominio):
+        with pytest.raises(ErrorDominio) as e:
             de_iso("2026-11-06T10:00:00")
+        assert e.value.codigo == "VALIDATION_ERROR"
 
 
 HORARIO = [(d, "09:00", "13:00") for d in range(1, 6)]
@@ -99,18 +103,3 @@ class TestHorario:
 
     def test_sabado(self):
         assert not dentro_de_horario(t(10, dia=7), t(10, 30, dia=7), HORARIO)
-
-
-class TestSlots:  # F-03
-    def test_viernes_sin_ocupados(self):
-        slots = slots_del_dia(date(2026, 11, 6), 30, HORARIO, [], AHORA)
-        assert len(slots) == 15  # 09:00 … 12:30 cada 15 min
-        assert slots[0][0] == t(9, dia=6) and slots[-1][1] == t(13, dia=6)
-
-    def test_respeta_ocupados_y_antelacion(self):
-        ocupado = [(t(11, 30), t(12))]
-        slots = [s for s, _ in slots_del_dia(date(2026, 11, 4), 30, HORARIO, ocupado, AHORA)]
-        assert t(11) in slots                 # justo 1 h de antelación
-        assert t(10, 45) not in slots         # menos de 1 h
-        assert t(11, 15) not in slots and t(11, 30) not in slots and t(11, 45) not in slots
-        assert t(12) in slots                 # contiguo al ocupado

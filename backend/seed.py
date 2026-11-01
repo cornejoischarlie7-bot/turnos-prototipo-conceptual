@@ -1,10 +1,12 @@
-"""Semilla de turnos.db con los mismos datos de ejemplo que el prototipo (plan.md §4).
+"""Semilla de turnos.db con los mismos datos de ejemplo que el mock de index.html (plan.md §3.2, spec D-08).
 
 Uso:
     python seed.py           # crea y siembra la base si está vacía
     python seed.py --reset   # borra turnos.db y la vuelve a sembrar
 
 Las fechas son relativas a "hoy" real, así los datos no envejecen al resembrar.
+Los id son UUID (spec §4) derivados de las claves del mock ("p1", "s1", "b1"…): `uid("p1")`.
+prototipo-turnos.html usa esos mismos UUID en sus datos locales.
 """
 import hashlib
 import os
@@ -15,7 +17,8 @@ from datetime import datetime, timedelta, timezone
 
 import config
 import db
-from domain import a_iso, ahora_utc, dentro_de_horario
+import reloj
+from domain import a_iso, dentro_de_horario
 
 NAMESPACE = uuid.UUID("6f1d2c1e-7a3b-4c5d-9e8f-0a1b2c3d4e5f")
 
@@ -65,7 +68,7 @@ SERVICIOS = [
     ("s6", "p3", "Plan alimentario", "Diseño de plan personalizado.", 45, 22000),
 ]
 
-# dia_semana: 0 = domingo … 6 = sábado (spec §11). Lunes a viernes.
+# dia_semana: 0 = domingo … 6 = sábado. Lunes a viernes.
 HORARIOS = {
     "p1": [("09:00", "13:00"), ("14:00", "18:00")],
     "p2": [("10:00", "14:00"), ("15:00", "19:00")],
@@ -104,7 +107,7 @@ def _redondear_a_grilla(d: datetime) -> datetime:
 
 
 def sembrar(conn: sqlite3.Connection, ahora: datetime | None = None) -> None:
-    ahora = ahora or ahora_utc()
+    ahora = ahora or reloj.ahora()
     tz = config.ZONA_OPERACION
     hoy = ahora.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
     d0 = sumar_habiles(hoy, 1)
