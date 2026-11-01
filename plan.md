@@ -2,14 +2,14 @@
 
 | Campo | Valor |
 |---|---|
-| Versión | 2.0.0 |
-| Versión anterior | Plan del prototipo interactivo en memoria (Fase 1); disponible en el historial de git |
-| Base normativa | [spec.md](spec.md) v2.0.0 · [historias-de-usuario.md](historias-de-usuario.md) |
+| Versión | 2.1.0 |
+| Versión anterior | 2.0.0 (contrato de turnos); antes, plan del prototipo en memoria (Fase 1), en el historial de git |
+| Base normativa | [spec.md](spec.md) v2.1.0 · [historias-de-usuario.md](historias-de-usuario.md) |
 | Prototipo de origen | [index.html](index.html) |
 | Fecha | 2026-11-01 |
 | Estado | Pendiente de aprobación |
 
-> Este plan no agrega reglas: implementa las de spec.md v2.0.0. Si algo de este plan contradice la spec, manda la spec.
+> Este plan no agrega reglas: implementa las de spec.md v2.1.0. Si algo de este plan contradice la spec, manda la spec. Los cambios de la versión 2.1.0 están en la §8.
 
 ---
 
@@ -76,7 +76,7 @@ flowchart LR
 | Validaciones de `domain/` sobre turnos | Se quitan del camino de decisión. La UI puede usarlas solo como ayuda visual (por ejemplo, deshabilitar "Cancelar" a menos de 2 h), pero el resultado lo decide la respuesta del Backend. |
 | Selector de usuario/rol | Envía el `Usuario.id` elegido en el encabezado `X-Usuario-Id` (spec D-06). |
 | Toasts de error | Muestran `error.mensaje` y usan `error.codigo` de la respuesta (spec §11.1). |
-| Catálogo, horarios, bloqueos, métricas, emails | Siguen con los datos locales del prototipo, con los **mismos `id`** que la semilla de la base (spec D-08). |
+| Catálogo, horarios, bloqueos, métricas, emails | **v2.0.0:** datos locales con los mismos `id` que la semilla (spec D-08). **v2.1.0:** catálogo, horarios, disponibilidad, bloqueos, auditoría y métricas vienen del Backend (§8); solo la lista de usuarios sigue local, y los emails no existen (D-07). |
 | Reloj simulado (+1 h, +1 día) | No afecta al Backend, que usa la hora real UTC. Se muestra deshabilitado o con una nota. |
 
 - Una constante `API_BASE = "http://localhost:8000"` concentra la URL del Backend.
@@ -335,6 +335,48 @@ Prueba de punta a punta manual: Backend en `:8000`, frontend en `:5500`, reserva
 | 1 | Motor de base de datos | SQLite (`turnos.db`), según spec D-04. |
 | 2 | Identificación del actor | Encabezado `X-Usuario-Id`, según spec D-06. |
 | 3 | `index.html` | Se conserva sin cambios como prototipo de la Fase 1. |
-| 4 | Catálogo, horarios, bloqueos y métricas en el frontend | Datos locales alineados con la semilla hasta que la spec defina sus endpoints (D-08). |
+| 4 | Catálogo, horarios, bloqueos y métricas en el frontend | v2.0.0: datos locales alineados con la semilla (D-08). v2.1.0: vienen de la API (§8). |
 | 5 | Reloj simulado | No se envía al Backend. Queda como pregunta abierta si se quiere un modo de prueba con reloj controlado. |
 | 6 | Emails (F-13) | No se persisten en Fase 2 (D-07). |
+| 7 | Estructura de módulos del Backend | Los módulos están planos en `backend/` (`main.py`, `service.py`, `domain.py`, `db.py`, `seed.py`, `reloj.py`, `schemas.py`) en lugar del paquete `app/` de la §3.2. El contrato y el comportamiento no cambian; queda como tarea opcional. |
+
+---
+
+## 8. Cambios de la versión 2.1.0
+
+La spec v2.1.0 agrega a la §11 los endpoints que en v2.0.0 estaban fuera de contrato (D-08), **sin cambiar la §4 ni las invariantes INV-01 a INV-03**. No hay tablas ni campos nuevos.
+
+### 8.1 Backend
+
+| Endpoint (spec) | Caso de uso (`backend/service.py`) | Regla |
+|---|---|---|
+| `GET /api/servicios` (§11.6) | `listar_servicios` | F-02, público |
+| `POST /api/servicios/{id}/activar` · `/desactivar` (§11.7) | `cambiar_activo_servicio` | RN-07: baja lógica, no toca turnos |
+| `GET` / `POST /api/horarios` (§11.8) | `listar_horarios`, `reemplazar_horario` | F-08, D-09 |
+| `GET /api/disponibilidad` (§11.9) | `disponibilidad` (+ `domain.slots_del_dia`) | F-03, RN-02, RN-04, RN-05 |
+| `GET` / `POST /api/bloqueos`, `POST /api/bloqueos/{id}/eliminar` (§11.10) | `listar_bloqueos`, `crear_bloqueo`, `eliminar_bloqueo` | RN-05 con conflictos y confirmación |
+| `POST /api/turnos/{id}/completar` · `/ausente` (§11.11) | `cerrar_turno` (+ `domain.validar_cierre`) | RN-06 |
+| `GET /api/auditoria` (§11.12) | `auditoria` | RN-08, solo lectura |
+| `GET /api/metricas` (§11.13) | `metricas` (+ `domain.calcular_metricas`, `minutos_disponibles`) | F-12, spec §5 |
+
+- Todas las escrituras usan `BEGIN IMMEDIATE` y registran su `AuditoriaEvento` en la misma transacción (INV-03). En el bloqueo con confirmación, las cancelaciones de turnos, el bloqueo y sus eventos van en una sola transacción.
+- Las lecturas públicas (`servicios`, `horarios`, `disponibilidad`) aceptan solicitudes sin `X-Usuario-Id` (spec §11.1).
+- CORS sin cambios: todas las acciones nuevas son `POST`.
+
+### 8.2 Frontend (`prototipo-turnos.html`)
+
+| Pantalla | v2.1.0 |
+|---|---|
+| Vista Cliente: servicios y horarios libres | `GET /api/servicios` y `GET /api/disponibilidad`. La grilla ya no es orientativa: considera las reservas de todos los clientes. |
+| Agenda | Bloqueos con `GET /api/bloqueos`. Completar y Ausente con `POST /api/turnos/{id}/completar` · `/ausente`. |
+| Bloqueos | Crear y eliminar. Si el servidor devuelve `conflictos`, el modal los lista y pide motivo para cancelarlos. |
+| Horarios (pestaña nueva) | Edita el horario semanal y lo guarda con `POST /api/horarios`. |
+| Servicios | Activar y desactivar. |
+| Auditoría | Tabla de `GET /api/auditoria`. |
+| Métricas | `GET /api/metricas` para la semana, el mes o los últimos 300 días más el horizonte. |
+
+Solo la lista de usuarios sigue local (no hay endpoint de usuarios, RBAC-04).
+
+### 8.3 Verificación
+
+`backend/tests/test_v21.py` cubre los criterios 8 y 13 a 20 de spec §8, los permisos y los errores de cada endpoint nuevo, y la atomicidad del bloqueo con cancelaciones cuando falla la auditoría.

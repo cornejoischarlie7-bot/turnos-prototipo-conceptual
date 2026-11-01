@@ -217,3 +217,43 @@ Mismo orden que [plan.md §6](plan.md). Fuente de verdad: [spec.md](spec.md) v2.
 - [ ] B7.2 Reservar el mismo slot desde dos navegadores distintos (plan §5, prueba manual).
 - [x] B7.3 README con cómo correr backend, frontend y tests.
 - [ ] B7.4 Completar la columna "Código" de la trazabilidad de spec §10 (requiere una versión nueva de la spec).
+
+---
+
+# Fase 2 del curso — Contrato ampliado ([spec.md](spec.md) v2.1.0, [plan.md](plan.md) §8)
+
+## Fase B8 — Spec y plan v2.1.0
+
+- [x] B8.1 spec.md v2.1.0: endpoints §11.6 – §11.13, criterios 13 a 20, D-08 resuelta, D-09 nueva, trazabilidad. §4 e INV-01 a INV-03 sin cambios.
+- [x] B8.2 plan.md v2.1.0 (§8) y estas tareas.
+
+## Fase B9 — Backend v2.1.0
+
+- [x] B9.1 `GET /api/servicios` y `POST /api/servicios/{id}/activar` · `/desactivar` (RN-07).
+- [x] B9.2 `GET` / `POST /api/horarios` con validación de franjas (F-08, D-09).
+- [x] B9.3 `GET /api/disponibilidad` con los turnos de todos los clientes (F-03).
+- [x] B9.4 Bloqueos: listar, crear con `conflictos` y confirmación, eliminar (RN-05).
+- [x] B9.5 `POST /api/turnos/{id}/completar` y `/ausente` (RN-06).
+- [x] B9.6 `GET /api/auditoria` (RN-08) y `GET /api/metricas` (F-12).
+- [x] B9.7 Lecturas públicas sin `X-Usuario-Id`; `conflictos` como única extensión del error.
+
+## Fase B10 — Verificación v2.1.0
+
+- [x] B10.1 Criterios 8 y 13 a 20 en `backend/tests/test_v21.py`, más permisos y errores de cada endpoint.
+- [x] B10.2 Atomicidad del bloqueo con cancelaciones si falla la auditoría.
+- [x] B10.3 Suite completa en verde.
+
+## Fase B11 — Frontend v2.1.0
+
+- [x] B11.1 Servicios y disponibilidad desde la API en la Vista Cliente.
+- [x] B11.2 Bloqueos (crear con conflicto y eliminar), Horarios, Servicios, Auditoría y Métricas desde la API.
+- [x] B11.3 Completar y Ausente en el detalle del turno.
+- [x] B11.4 Prueba de punta a punta: disponibilidad entre clientes, bloqueo con conflicto y motivo, auditoría, métricas, activar y desactivar servicio, guardar horario.
+- [ ] B11.5 Probar Completar y Ausente desde la interfaz con un turno real ya iniciado (cubierto por tests; hoy la semilla no tiene turnos confirmados en curso).
+
+## Pendientes fuera de v2.1.0
+
+- [ ] Endpoint de usuarios (hoy la lista sigue local en el frontend).
+- [ ] Login real y verificación de email (F-01, D-06) y emails (F-13, D-07): requieren cambiar la §4.
+- [ ] Alta y edición de servicios (F-07).
+- [ ] Reorganizar el backend en el paquete `app/` (plan §7, decisión 7).

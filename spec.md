@@ -2,8 +2,8 @@
 
 | Campo | Valor |
 |---|---|
-| Versión | 2.0.0 (Fase 2 — Arquitectura desacoplada) |
-| Versión anterior | 0.1.0 (MVP, Fase 1 — prototipo en memoria) |
+| Versión | 2.1.0 (Fase 2 — Arquitectura desacoplada: contrato ampliado) |
+| Versión anterior | 2.0.0 (contrato de turnos); 0.1.0 (MVP, Fase 1 — prototipo en memoria) |
 | Estado | Borrador para revisión |
 | Metodología | Spec-Driven Development (SDD) |
 | Fecha | 2026-11-01 |
@@ -11,6 +11,18 @@
 > Este documento es el **contrato del sistema**. Todo código, test y decisión de diseño debe poder trazarse a una sección de este archivo. Si el código y la spec divergen, se corrige primero la spec y luego el código.
 
 Palabras clave normativas: **DEBE** (obligatorio), **NO DEBE** (prohibido), **PUEDE** (opcional), según RFC 2119.
+
+### Cambios de la versión 2.1.0
+
+| Sección | Cambio |
+|---|---|
+| §3, §4 | **Sin cambios.** INV-01, INV-02 e INV-03 y el modelo de datos quedan idénticos. |
+| §8 | Nuevos criterios 13 a 20 (endpoints nuevos). |
+| §9 | D-08 resuelta en parte: catálogo, horarios, disponibilidad, bloqueos, servicios, cierre de turnos, auditoría y métricas pasan al contrato. Nueva decisión D-09 (cambio de horario laboral con turnos ya reservados). |
+| §10 | Trazabilidad ampliada. |
+| §11.1 | Las lecturas públicas (§2.2) aceptan solicitudes sin `X-Usuario-Id`. Nuevo campo opcional `conflictos` en el error de RN-05. |
+| §11.6 – §11.14 | **Nuevo:** endpoints de servicios, horario laboral, disponibilidad, bloqueos, completar / ausente, auditoría y métricas. |
+| §11.15 | Lo que sigue fuera del contrato (antes §11.6). |
 
 ### Cambios de la versión 2.0.0
 
@@ -398,6 +410,14 @@ Alcance: el `PROFESIONAL` ve solo las suyas; el `ADMIN` ve las globales y por pr
 10. **Atomicidad (INV-03)**: *Dado* que la escritura del `AuditoriaEvento` falla dentro de una reserva, *entonces* el `Turno` tampoco se persiste y la respuesta es un error.
 11. **Cancelación vía API (INV-01)**: *Dado* un turno del cliente que inicia en 1 h 59 min, *cuando* el cliente llama a `POST /api/turnos/{id}/cancelar`, *entonces* recibe `409 CANCELLATION_WINDOW_EXPIRED` y el turno sigue `CONFIRMADO` en la base.
 12. **Solapamiento vía API (INV-02)**: *Dado* un turno `CONFIRMADO` 10:00–10:30 con P, *cuando* dos `POST /api/turnos` simultáneos piden 10:15 con P, *entonces* ambos reciben `409 SLOT_UNAVAILABLE`; y si el slot está libre, exactamente uno responde `201`.
+13. **Disponibilidad real (F-03)**: *Dado* un turno `CONFIRMADO` del cliente A 10:00–10:30 con P, *cuando* el cliente B consulta `GET /api/disponibilidad` de ese día, *entonces* 10:00 no figura, 10:30 sí, y la respuesta no identifica a A.
+14. **Servicio desactivado (RN-07)**: *Dado* un servicio con turnos futuros, *cuando* el profesional lo desactiva, *entonces* responde `200`, los turnos siguen `CONFIRMADO` y una reserva nueva recibe `409 SERVICE_UNAVAILABLE`.
+15. **Bloqueo con conflicto vía API (RN-05)**: *Dado* un turno confirmado dentro del rango, *cuando* se pide `POST /api/bloqueos` sin confirmar, *entonces* `409 SLOT_UNAVAILABLE` con `conflictos` y no se crea nada; *cuando* se confirma con motivo, *entonces* `201`, el turno queda `CANCELADO` y el bloqueo existe, en una sola transacción.
+16. **Bloqueo y reserva**: *Dado* un bloqueo, *cuando* se reserva dentro del rango, *entonces* `409 SLOT_UNAVAILABLE`; *cuando* se elimina el bloqueo, *entonces* la reserva se confirma.
+17. **Cierre del turno (RN-06)**: *Dado* un turno que todavía no empezó, *cuando* el profesional lo completa, *entonces* `409 INVALID_STATE_TRANSITION`; desde su `inicio`, `completar` responde `200`; `ausente` exige `ahora ≥ fin`; un cliente recibe `403`.
+18. **Horario laboral (F-08, D-09)**: *Dado* un turno confirmado un lunes, *cuando* el profesional deja de trabajar los lunes, *entonces* el turno sigue `CONFIRMADO` y ese lunes ya no ofrece disponibilidad.
+19. **Auditoría (RN-08)**: *Dado* una reserva y una cancelación, *cuando* el `ADMIN` consulta `GET /api/auditoria`, *entonces* ve `TURNO_CREADO` y `TURNO_CANCELADO` con actor y rol; un `CLIENTE` recibe `403`.
+20. **Métricas (F-12)**: *Dado* un período con turnos completados, ausentes y cancelados, *cuando* se consulta `GET /api/metricas`, *entonces* los conteos y tasas coinciden con la §5 y un `PROFESIONAL` solo ve las suyas.
 
 ---
 
@@ -412,7 +432,8 @@ Alcance: el `PROFESIONAL` ve solo las suyas; el `ADMIN` ve las globales y por pr
 | D-05 | ¿Confirmación automática o aprobación manual del profesional? | Automática |
 | D-06 | ¿Cómo se autentica el actor en la API? | Fase 2: encabezado `X-Usuario-Id` (simula el selector de rol del prototipo). El login real (F-01) se especifica en una versión posterior. |
 | D-07 | ¿Dónde se registran los emails de F-13? | La §4 no tiene entidad de emails. En Fase 2 el backend no persiste emails; agregar una entidad requiere modificar antes la §4. |
-| D-08 | ¿Qué endpoints exponen catálogo, disponibilidad, bloqueos, horarios y métricas? | Fuera de esta versión del contrato. En Fase 2 el frontend los sigue resolviendo con sus datos locales, alineados con la semilla de la base. |
+| D-08 | ¿Qué endpoints exponen catálogo, disponibilidad, bloqueos, horarios y métricas? | **Resuelta en v2.1.0** (§11.6 – §11.13). Sigue pendiente la lectura de usuarios: el frontend conserva la lista local de usuarios, alineada con la semilla. |
+| D-09 | ¿Qué pasa con los turnos ya confirmados si cambia el horario laboral? | Se conservan sin cambios (igual que RN-07 con la duración). El nuevo horario solo rige para reservas nuevas. |
 
 ---
 
@@ -428,6 +449,13 @@ Alcance: el `PROFESIONAL` ve solo las suyas; el `ADMIN` ve las globales y por pr
 | INV-01 (RN-01) | `POST /api/turnos/{id}/cancelar` | Criterios 4, 5, 11 |
 | INV-02 (RN-02) | `POST /api/turnos` + restricción en la base | Criterios 1, 2, 3, 12 |
 | INV-03 | Capa de persistencia (`turnos.db`) | Criterios 9, 10 |
+| F-02, F-03 | `GET /api/servicios`, `GET /api/disponibilidad` | Criterio 13 |
+| RN-07 | `POST /api/servicios/{id}/desactivar` | Criterio 14 |
+| RN-05 | `POST /api/bloqueos`, `POST /api/bloqueos/{id}/eliminar` | Criterios 8, 15, 16 |
+| RN-06 | `POST /api/turnos/{id}/completar`, `/ausente` | Criterio 17 |
+| F-08, D-09 | `GET` / `POST /api/horarios` | Criterio 18 |
+| RN-08 | `GET /api/auditoria` | Criterio 19 |
+| F-12 | `GET /api/metricas` | Criterio 20 |
 
 ---
 
@@ -442,6 +470,7 @@ Este contrato gobierna el Backend de la Fase 2. Toda implementación y todo test
 - **Instantes:** cadenas ISO 8601 en UTC con sufijo `Z` (por ejemplo, `2026-11-03T13:00:00Z`). Ver RN-04.
 - **Identificadores:** UUID, como en la §4.
 - **Actor:** cada solicitud DEBE identificar al usuario que actúa con el encabezado `X-Usuario-Id: <Usuario.id>`. El backend obtiene el `rol` del `Usuario` en la base, nunca de la solicitud. Sin encabezado, o con un usuario inexistente o inactivo, se responde `401 UNAUTHENTICATED` (ver D-06).
+- **Lecturas públicas (v2.1.0):** las que la §2.2 permite al Anónimo (`GET /api/servicios`, `GET /api/horarios`, `GET /api/disponibilidad`) PUEDEN enviarse sin `X-Usuario-Id`. Si el encabezado viene con un usuario inexistente o inactivo, igual se responde `401 UNAUTHENTICATED`.
 - **RBAC:** se aplica en el backend según la §2 (RBAC-01). Un turno ajeno se responde como `404 NOT_FOUND` (RBAC-02).
 - **Errores:** toda respuesta de error tiene la forma:
 
@@ -449,7 +478,7 @@ Este contrato gobierna el Backend de la Fase 2. Toda implementación y todo test
   { "error": { "codigo": "SLOT_UNAVAILABLE", "mensaje": "Texto legible para la persona usuaria." } }
   ```
 
-  `codigo` DEBE ser uno de la §7.
+  `codigo` DEBE ser uno de la §7. La única extensión permitida es el campo `conflictos` (lista de Turnos, §11.2) en el error de RN-05 de §11.10.
 
 ### 11.2 Representación de un Turno
 
@@ -542,6 +571,121 @@ La respuesta expone **exactamente** los atributos de la entidad `Turno` de la §
 | Falta motivo (profesional / admin) | `422 REASON_REQUIRED` |
 | Falla de la base | `503 PERSISTENCE_UNAVAILABLE` |
 
-### 11.6 Fuera de este contrato (v2.0.0)
+### 11.6 `GET /api/servicios` — Catálogo (F-02)
 
-Registro e inicio de sesión (F-01), catálogo (F-02), disponibilidad (F-03), servicios (F-07), horario laboral (F-08), bloqueos (F-09), cierre de turnos como `COMPLETADO` / `AUSENTE` (RN-06), métricas (F-12) y emails (F-13). Ver D-06, D-07 y D-08.
+| Aspecto | Definición |
+|---|---|
+| Permisos | Todos, incluido el Anónimo (§2.2). |
+| Respuesta `200` | Arreglo de Servicios con **exactamente** los 7 atributos de `Servicio` en la §4.1, ordenado por `nombre`. Incluye los desactivados (`activo = false`), que no admiten reservas (RN-07). |
+| Errores | `401 UNAUTHENTICATED` (encabezado inválido), `503 PERSISTENCE_UNAVAILABLE`. |
+
+### 11.7 `POST /api/servicios/{id}/activar` y `POST /api/servicios/{id}/desactivar` — Baja lógica (F-07, RN-07)
+
+| Aspecto | Definición |
+|---|---|
+| Permisos | `PROFESIONAL`: solo sus servicios (ajeno → `404`). `ADMIN`: cualquiera. `CLIENTE`: `403 FORBIDDEN`. |
+| Cuerpo | Ninguno. |
+| Regla | Desactivar impide nuevas reservas y **no** afecta los turnos ya confirmados (RN-07). Se permite aunque haya turnos futuros: `SERVICE_HAS_ACTIVE_BOOKINGS` aplica solo a la eliminación, que no existe en este contrato. |
+| Atomicidad | Si el estado cambia, en una transacción se actualiza `activo` y se registra `AuditoriaEvento` (`SERVICIO_ACTIVADO` / `SERVICIO_DESACTIVADO`). Repetir la acción no cambia nada ni audita. |
+| Respuesta `200` | El Servicio actualizado. |
+| Errores | `401`, `403 FORBIDDEN`, `404 NOT_FOUND`, `503`. |
+
+### 11.8 Horario laboral (F-08)
+
+**`GET /api/horarios`** — Permisos: todos, incluido el Anónimo. Parámetro opcional `profesional_id`. Respuesta `200`: arreglo de `HorarioLaboral` con exactamente sus 5 atributos de la §4.1, ordenado por `profesional_id`, `dia_semana` y `hora_inicio`. `dia_semana`: 0 = domingo … 6 = sábado.
+
+**`POST /api/horarios`** — Reemplaza el horario semanal completo de un profesional.
+
+```json
+{ "profesional_id": "c7d0…", "franjas": [ { "dia_semana": 1, "hora_inicio": "09:00", "hora_fin": "13:00" } ] }
+```
+
+| Aspecto | Definición |
+|---|---|
+| Permisos | `PROFESIONAL`: solo el propio (otro → `404`). `ADMIN`: cualquier profesional. `CLIENTE`: `403`. |
+| Reglas | Horas `HH:MM` (de `00:00` a `24:00`) alineadas a la grilla (RN-04) y `hora_inicio < hora_fin`; las franjas de un mismo día no se solapan. En otro caso, `422 INVALID_TIME_RANGE`. Una lista vacía deja al profesional sin horario. Los turnos ya confirmados no se modifican (D-09). |
+| Atomicidad | En una transacción se borran las franjas anteriores del profesional, se insertan las nuevas y se registra `AuditoriaEvento` (`HORARIO_ACTUALIZADO`, `entidad_id` = profesional). |
+| Respuesta `200` | El nuevo horario del profesional (arreglo de `HorarioLaboral`). |
+| Errores | `401`, `403`, `404` (profesional inexistente o ajeno), `422 VALIDATION_ERROR` / `INVALID_TIME_RANGE`, `503`. |
+
+### 11.9 `GET /api/disponibilidad` — Slots libres (F-03)
+
+| Aspecto | Definición |
+|---|---|
+| Permisos | Todos, incluido el Anónimo (§2.2). |
+| Parámetros | `servicio_id` (obligatorio) y `fecha` (`AAAA-MM-DD`, día en la zona de operación, obligatorio). |
+| Regla | Devuelve los `[inicio, fin)` alineados a la grilla dentro del horario laboral del profesional que cumplen RN-04 (antelación y horizonte) y no se solapan con turnos `CONFIRMADO` de **cualquier** cliente ni con bloqueos (RN-02, RN-05). No expone quién reservó (RBAC-04). Es la misma regla que aplica `POST /api/turnos`; la reserva sigue siendo la que decide (INV-02). |
+| Respuesta `200` | Arreglo de `{ "inicio", "fin" }` (ISO 8601 UTC), ordenado. Puede ser vacío. |
+| Errores | `404 NOT_FOUND` (servicio inexistente), `409 SERVICE_UNAVAILABLE` (desactivado), `422 VALIDATION_ERROR` (parámetro faltante o mal formado), `422 INVALID_TIME_RANGE` (fecha pasada o más allá del horizonte), `503`. |
+
+### 11.10 Bloqueos (F-09, RN-05)
+
+**`GET /api/bloqueos`** — `PROFESIONAL`: los suyos. `ADMIN`: todos (filtro opcional `profesional_id`). `CLIENTE`: `403`. Respuesta `200`: arreglo de `Bloqueo` con exactamente sus 5 atributos de la §4.1, ordenado por `inicio`.
+
+**`POST /api/bloqueos`** — Crear un bloqueo.
+
+```json
+{ "profesional_id": "c7d0…", "inicio": "2026-11-05T15:00:00Z", "fin": "2026-11-05T16:00:00Z",
+  "motivo": "Trámite personal", "confirmar_cancelacion": false }
+```
+
+| Aspecto | Definición |
+|---|---|
+| Permisos | `PROFESIONAL`: solo para sí (otro → `404`). `ADMIN`: cualquier profesional. `CLIENTE`: `403`. |
+| Reglas | `inicio < fin` y `fin` futuro; si no, `422 INVALID_TIME_RANGE`. Si hay turnos `CONFIRMADO` del profesional que se solapan con el rango: si alguno ya comenzó, `409 INVALID_STATE_TRANSITION`; si `confirmar_cancelacion` es `false`, `409 SLOT_UNAVAILABLE` con el campo `conflictos` (los turnos afectados) y **no** se crea nada; si es `true`, `motivo` es obligatorio (`422 REASON_REQUIRED`) y los turnos afectados se cancelan con la excepción de RN-01. |
+| Atomicidad (INV-03) | En una transacción: cancelación de cada turno afectado con su `AuditoriaEvento` (`TURNO_CANCELADO`), inserción del `Bloqueo` y su `AuditoriaEvento` (`BLOQUEO_CREADO`). |
+| Respuesta `201` | `{ "bloqueo": Bloqueo, "turnos_cancelados": [Turno, …] }` y encabezado `Location: /api/bloqueos/{id}`. |
+| Errores | `401`, `403`, `404`, `409 SLOT_UNAVAILABLE` / `INVALID_STATE_TRANSITION`, `422 VALIDATION_ERROR` / `INVALID_TIME_RANGE` / `REASON_REQUIRED`, `503`. |
+
+**`POST /api/bloqueos/{id}/eliminar`** — Quita un bloqueo (el rango vuelve a ser reservable). Permisos como en el alta (ajeno o inexistente → `404`). En una transacción se borra el `Bloqueo` y se registra `AuditoriaEvento` (`BLOQUEO_ELIMINADO`). Respuesta `200` con el Bloqueo eliminado.
+
+### 11.11 `POST /api/turnos/{id}/completar` y `POST /api/turnos/{id}/ausente` — Cierre del turno (RN-06)
+
+| Aspecto | Definición |
+|---|---|
+| Permisos | `PROFESIONAL`: turnos de su agenda. `ADMIN`: cualquiera. `CLIENTE`: `403 FORBIDDEN`. Turno inexistente o ajeno: `404` (RBAC-02). |
+| Reglas | Solo desde `CONFIRMADO`. `completar` exige `ahora ≥ inicio`; `ausente` exige `ahora ≥ fin`. En otro caso, `409 INVALID_STATE_TRANSITION`. |
+| Atomicidad | Actualización de `estado` y `actualizado_en`, y `AuditoriaEvento` (`TURNO_COMPLETADO` / `TURNO_AUSENTE`) en la misma transacción. |
+| Respuesta `200` | El Turno actualizado (§11.2). |
+
+### 11.12 `GET /api/auditoria` — Registro de auditoría (RN-08)
+
+| Aspecto | Definición |
+|---|---|
+| Permisos | `ADMIN`: todos los eventos. `PROFESIONAL`: los que originó y los de turnos de su agenda. `CLIENTE`: `403`. |
+| Respuesta `200` | Arreglo de `AuditoriaEvento` con exactamente sus 8 atributos de la §4.1, del más reciente al más antiguo. Solo lectura: no hay endpoints para modificar la auditoría. |
+
+### 11.13 `GET /api/metricas` — Métricas (F-12, §5)
+
+| Aspecto | Definición |
+|---|---|
+| Permisos | `ADMIN`: globales o de un profesional (`profesional_id`). `PROFESIONAL`: solo las propias (otro `profesional_id` → `404`). `CLIENTE`: `403`. |
+| Parámetros | `desde` y `hasta` (instantes ISO 8601, obligatorios, `desde < hasta`, a lo sumo 366 días; si no, `422 INVALID_TIME_RANGE`). Se consideran los turnos con `inicio` en `[desde, hasta)`. |
+| Respuesta `200` | Las métricas de la §5 calculadas en el servidor (ver abajo). |
+
+```json
+{
+  "desde": "…", "hasta": "…", "total": 12,
+  "por_estado": { "CONFIRMADO": 5, "COMPLETADO": 4, "CANCELADO": 2, "AUSENTE": 1 },
+  "turnos_por_dia": [ { "fecha": "2026-11-02", "cantidad": 3 } ],
+  "tasa_cancelacion": 0.17,
+  "cancelaciones_por_rol": { "CLIENTE": 1, "PROFESIONAL": 1, "ADMIN": 0 },
+  "tasa_ausentismo": 0.2,
+  "ocupacion": 0.35, "minutos_reservados": 420, "minutos_disponibles": 1200,
+  "top_servicios": [ { "servicio_id": "e4f5…", "cantidad": 4 } ]
+}
+```
+
+- `turnos_por_dia`: turnos `CONFIRMADO` o `COMPLETADO` por día de la zona de operación.
+- `tasa_cancelacion`: `CANCELADO / total`; `cancelaciones_por_rol` usa el rol del usuario en `cancelado_por_id`.
+- `tasa_ausentismo`: `AUSENTE / (COMPLETADO + AUSENTE)`.
+- `ocupacion`: minutos de turnos no cancelados / minutos del horario laboral menos los bloqueos, en el período. Las tasas valen `0` si el denominador es `0`.
+- `top_servicios`: turnos no cancelados por servicio, de mayor a menor.
+
+### 11.14 Representaciones de §4.1 en v2.1.0
+
+Servicio, HorarioLaboral, Bloqueo y AuditoriaEvento se exponen con exactamente sus atributos de la §4.1, sin campos adicionales, con las mismas convenciones de la §11.1. `Usuario` no se expone en esta versión (RBAC-04).
+
+### 11.15 Fuera de este contrato (v2.1.0)
+
+Registro e inicio de sesión y verificación de email (F-01, D-06), emails (F-13, D-07), alta y edición de servicios (crear, cambiar nombre, duración o precio, F-07) y gestión de usuarios y roles (RBAC-03). Requieren decisiones nuevas y, en el caso de emails y sesiones, cambios en la §4.
