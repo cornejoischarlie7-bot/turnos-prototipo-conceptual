@@ -1,4 +1,4 @@
-"""Capa 2: backend HTTP (FastAPI, puerto 8000). Contrato: spec.md §11; plan.md §3.2.
+"""Capa 2: backend HTTP (FastAPI, puerto 8000). Contrato: spec.md §11 (v2.1.0); plan.md §3.2.
 
 Arranque (desde backend/):
     python -m uvicorn main:app --port 8000
@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Sistema de Turnos",
-    version="2.0.0",
+    version="2.1.0",
     description="Contrato de spec.md §11. El actor se identifica con el encabezado `X-Usuario-Id` (D-06).",
     lifespan=lifespan,
 )
@@ -46,7 +46,11 @@ def error(codigo: str, mensaje: str) -> JSONResponse:
 
 @app.exception_handler(ErrorDominio)
 async def error_dominio(_: Request, e: ErrorDominio) -> JSONResponse:
-    return error(e.codigo, e.mensaje)
+    r = error(e.codigo, e.mensaje)
+    if e.detalles and "conflictos" in e.detalles:          # única extensión permitida (§11.1, RN-05)
+        r = JSONResponse({"error": {"codigo": e.codigo, "mensaje": e.mensaje, "conflictos": e.detalles["conflictos"]}},
+                         status_code=e.http)
+    return r
 
 
 @app.exception_handler(RequestValidationError)
@@ -107,3 +111,104 @@ def crear_turno(body: schemas.ReservaIn, conn: Conexion, yo: Actor, response: Re
 def cancelar_turno(turno_id: str, conn: Conexion, yo: Actor, body: schemas.CancelacionIn | None = None) -> dict[str, Any]:
     """§11.5: 409 `CANCELLATION_WINDOW_EXPIRED` si el cliente cancela a menos de 2 h (INV-01)."""
     return service.cancelar_turno(conn, yo, turno_id, body.motivo if body else None)
+
+
+# ---------------------------------------------------------------- v2.1.0: §11.6 – §11.13
+def actor_opcional(conn: Conexion, x_usuario_id: Annotated[str | None, Header()] = None) -> sqlite3.Row | None:
+    """§11.1: las lecturas públicas aceptan Anónimo; un encabezado inválido sigue siendo 401."""
+    return service.actor_por_id(conn, x_usuario_id) if x_usuario_id is not None else None
+
+
+ActorOpcional = Annotated[sqlite3.Row | None, Depends(actor_opcional)]
+
+
+@app.get("/api/servicios", response_model=list[schemas.Servicio], responses=schemas.errores(401, 503), tags=["catálogo"])
+def listar_servicios(conn: Conexion, _yo: ActorOpcional) -> list[dict[str, Any]]:
+    """§11.6 (F-02): catálogo público, incluidos los servicios desactivados."""
+    return service.listar_servicios(conn)
+
+
+@app.post("/api/servicios/{servicio_id}/activar", response_model=schemas.Servicio,
+          responses=schemas.errores(401, 403, 404, 503), tags=["catálogo"])
+def activar_servicio(servicio_id: str, conn: Conexion, yo: Actor) -> dict[str, Any]:
+    """§11.7 (RN-07)."""
+    return service.cambiar_activo_servicio(conn, yo, servicio_id, True)
+
+
+@app.post("/api/servicios/{servicio_id}/desactivar", response_model=schemas.Servicio,
+          responses=schemas.errores(401, 403, 404, 503), tags=["catálogo"])
+def desactivar_servicio(servicio_id: str, conn: Conexion, yo: Actor) -> dict[str, Any]:
+    """§11.7 (RN-07): baja lógica; los turnos confirmados no cambian."""
+    return service.cambiar_activo_servicio(conn, yo, servicio_id, False)
+
+
+@app.get("/api/horarios", response_model=list[schemas.HorarioLaboral], responses=schemas.errores(401, 503), tags=["catálogo"])
+def listar_horarios(conn: Conexion, _yo: ActorOpcional, profesional_id: str | None = None) -> list[dict[str, Any]]:
+    """§11.8 (F-08): horario laboral público."""
+    return service.listar_horarios(conn, profesional_id)
+
+
+@app.post("/api/horarios", response_model=list[schemas.HorarioLaboral],
+          responses=schemas.errores(401, 403, 404, 422, 503), tags=["catálogo"])
+def reemplazar_horario(body: schemas.HorarioIn, conn: Conexion, yo: Actor) -> list[dict[str, Any]]:
+    """§11.8 (F-08, D-09): reemplaza el horario semanal completo del profesional."""
+    franjas = [(f.dia_semana, f.hora_inicio, f.hora_fin) for f in body.franjas]
+    return service.reemplazar_horario(conn, yo, str(body.profesional_id), franjas)
+
+
+@app.get("/api/disponibilidad", response_model=list[schemas.Slot], responses=schemas.errores(401, 404, 409, 422, 503),
+         tags=["catálogo"])
+def disponibilidad(conn: Conexion, _yo: ActorOpcional, servicio_id: str, fecha: str) -> list[dict[str, str]]:
+    """§11.9 (F-03): slots libres considerando los turnos de todos los clientes."""
+    return service.disponibilidad(conn, servicio_id, fecha)
+
+
+@app.get("/api/bloqueos", response_model=list[schemas.Bloqueo], responses=schemas.errores(401, 403, 503), tags=["agenda"])
+def listar_bloqueos(conn: Conexion, yo: Actor, profesional_id: str | None = None) -> list[dict[str, Any]]:
+    """§11.10 (F-09)."""
+    return service.listar_bloqueos(conn, yo, profesional_id)
+
+
+@app.post("/api/bloqueos", status_code=201, response_model=schemas.BloqueoCreado,
+          responses=schemas.errores(401, 403, 404, 409, 422, 503), tags=["agenda"])
+def crear_bloqueo(body: schemas.BloqueoIn, conn: Conexion, yo: Actor, response: Response) -> dict[str, Any]:
+    """§11.10 (RN-05): 409 `SLOT_UNAVAILABLE` con `conflictos` si hay turnos y no se confirmó su cancelación."""
+    r = service.crear_bloqueo(conn, yo, str(body.profesional_id), body.inicio, body.fin, body.motivo,
+                              body.confirmar_cancelacion)
+    response.headers["Location"] = f"/api/bloqueos/{r['bloqueo']['id']}"
+    return r
+
+
+@app.post("/api/bloqueos/{bloqueo_id}/eliminar", response_model=schemas.Bloqueo,
+          responses=schemas.errores(401, 403, 404, 503), tags=["agenda"])
+def eliminar_bloqueo(bloqueo_id: str, conn: Conexion, yo: Actor) -> dict[str, Any]:
+    """§11.10."""
+    return service.eliminar_bloqueo(conn, yo, bloqueo_id)
+
+
+@app.post("/api/turnos/{turno_id}/completar", response_model=schemas.Turno,
+          responses=schemas.errores(401, 403, 404, 409, 503), tags=["turnos"])
+def completar_turno(turno_id: str, conn: Conexion, yo: Actor) -> dict[str, Any]:
+    """§11.11 (RN-06): desde el inicio del turno."""
+    return service.cerrar_turno(conn, yo, turno_id, "COMPLETADO")
+
+
+@app.post("/api/turnos/{turno_id}/ausente", response_model=schemas.Turno,
+          responses=schemas.errores(401, 403, 404, 409, 503), tags=["turnos"])
+def marcar_ausente(turno_id: str, conn: Conexion, yo: Actor) -> dict[str, Any]:
+    """§11.11 (RN-06): una vez finalizado el turno."""
+    return service.cerrar_turno(conn, yo, turno_id, "AUSENTE")
+
+
+@app.get("/api/auditoria", response_model=list[schemas.AuditoriaEvento], responses=schemas.errores(401, 403, 503),
+         tags=["agenda"])
+def auditoria(conn: Conexion, yo: Actor) -> list[dict[str, Any]]:
+    """§11.12 (RN-08): solo lectura."""
+    return service.auditoria(conn, yo)
+
+
+@app.get("/api/metricas", response_model=schemas.Metricas, responses=schemas.errores(401, 403, 404, 422, 503),
+         tags=["agenda"])
+def metricas(conn: Conexion, yo: Actor, desde: str, hasta: str, profesional_id: str | None = None) -> dict[str, Any]:
+    """§11.13 (F-12, §5)."""
+    return service.metricas(conn, yo, desde, hasta, profesional_id)

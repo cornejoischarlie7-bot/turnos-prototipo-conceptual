@@ -1,19 +1,26 @@
-"""Casos de uso del backend (spec.md §11.3 – §11.5). Une el dominio puro con la base de datos.
+"""Casos de uso del backend (spec.md §11.3 – §11.13). Une el dominio puro con la base de datos.
 
 Cada función recibe la conexión y el actor (fila de `usuario`, ya autenticado). La hora
 sale de `reloj.ahora()`, que los tests reemplazan para probar las reglas temporales.
 """
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
+import config
 import db
 import reloj
-from domain import (ErrorDominio, a_iso, calcular_fin, de_iso, dentro_de_horario, validar_cancelacion,
-                    validar_contacto, validar_inicio)
+from domain import (ErrorDominio, a_iso, calcular_fin, calcular_metricas, de_iso, dentro_de_horario,
+                    minutos_disponibles, slots_del_dia, validar_cancelacion, validar_cierre, validar_contacto,
+                    validar_franjas, validar_inicio)
 
+# Representaciones de §11.2 y §11.14: exactamente los atributos de §4.1.
 CAMPOS_TURNO = ("id", "cliente_id", "profesional_id", "servicio_id", "inicio", "fin", "estado",
                 "motivo_cancelacion", "cancelado_por_id", "creado_en", "actualizado_en")
+CAMPOS_SERVICIO = ("id", "profesional_id", "nombre", "descripcion", "duracion_min", "precio_referencia", "activo")
+CAMPOS_HORARIO = ("id", "profesional_id", "dia_semana", "hora_inicio", "hora_fin")
+CAMPOS_BLOQUEO = ("id", "profesional_id", "inicio", "fin", "motivo")
+CAMPOS_AUDITORIA = ("id", "entidad", "entidad_id", "accion", "actor_id", "rol", "ocurrido_en", "detalle")
 
 
 def turno_json(r: sqlite3.Row) -> dict:
@@ -143,3 +150,219 @@ def cancelar_turno(conn, actor, turno_id: str, motivo: str | None) -> dict:
         _auditar(conn, actor, "TURNO_CANCELADO", "Turno", turno_id,
                  f"Motivo: {motivo}" if motivo else "Cancelado sin motivo", ahora)                 # RN-08
         return turno_json(conn.execute("SELECT * FROM turno WHERE id = ?", (turno_id,)).fetchone())
+
+
+# ================================================================ v2.1.0 (spec §11.6 – §11.13)
+def _fila(r: sqlite3.Row, campos: tuple[str, ...]) -> dict:
+    return {k: r[k] for k in campos}
+
+
+def servicio_json(r: sqlite3.Row) -> dict:
+    d = _fila(r, CAMPOS_SERVICIO)
+    d["activo"] = bool(d["activo"])
+    return d
+
+
+def _profesional_en_alcance(conn, actor, profesional_id: str) -> None:
+    """RBAC (§2.2): CLIENTE → 403; un PROFESIONAL solo sobre sí mismo (otro → 404, RBAC-02)."""
+    if actor["rol"] == "CLIENTE":
+        raise ErrorDominio("FORBIDDEN", "No tenés permiso para esta acción.")
+    if actor["rol"] == "PROFESIONAL" and profesional_id != actor["id"]:
+        raise ErrorDominio("NOT_FOUND", "El profesional no existe o no tenés acceso a él.")
+    if conn.execute("SELECT 1 FROM usuario WHERE id = ? AND rol = 'PROFESIONAL'", (profesional_id,)).fetchone() is None:
+        raise ErrorDominio("NOT_FOUND", "El profesional no existe.")
+
+
+def _horarios_de(conn, profesional_id: str) -> list[tuple[int, str, str]]:
+    return [(h["dia_semana"], h["hora_inicio"], h["hora_fin"]) for h in
+            conn.execute("SELECT * FROM horario_laboral WHERE profesional_id = ?", (profesional_id,))]
+
+
+# ---------------------------------------------------------------- §11.6 – §11.7 servicios
+def listar_servicios(conn) -> list[dict]:
+    return [servicio_json(r) for r in conn.execute("SELECT * FROM servicio ORDER BY nombre")]
+
+
+def cambiar_activo_servicio(conn, actor, servicio_id: str, activo: bool) -> dict:
+    """RN-07: baja lógica; los turnos ya confirmados no cambian."""
+    if actor["rol"] == "CLIENTE":
+        raise ErrorDominio("FORBIDDEN", "No tenés permiso para esta acción.")
+    with db.transaccion(conn):
+        svc = conn.execute("SELECT * FROM servicio WHERE id = ?", (servicio_id,)).fetchone()
+        if svc is None or (actor["rol"] == "PROFESIONAL" and svc["profesional_id"] != actor["id"]):
+            raise ErrorDominio("NOT_FOUND", "El servicio no existe o no tenés acceso a él.")
+        if bool(svc["activo"]) != activo:
+            conn.execute("UPDATE servicio SET activo = ? WHERE id = ?", (int(activo), servicio_id))
+            _auditar(conn, actor, "SERVICIO_ACTIVADO" if activo else "SERVICIO_DESACTIVADO", "Servicio", servicio_id,
+                     svc["nombre"], reloj.ahora())
+        return servicio_json(conn.execute("SELECT * FROM servicio WHERE id = ?", (servicio_id,)).fetchone())
+
+
+# ---------------------------------------------------------------- §11.8 horario laboral
+def listar_horarios(conn, profesional_id: str | None = None) -> list[dict]:
+    sql, args = "SELECT * FROM horario_laboral", []
+    if profesional_id:
+        sql += " WHERE profesional_id = ?"; args.append(profesional_id)
+    return [_fila(r, CAMPOS_HORARIO) for r in conn.execute(sql + " ORDER BY profesional_id, dia_semana, hora_inicio", args)]
+
+
+def reemplazar_horario(conn, actor, profesional_id: str, franjas: list[tuple[int, str, str]]) -> list[dict]:
+    """F-08. D-09: los turnos ya confirmados no se modifican."""
+    validar_franjas(franjas)
+    with db.transaccion(conn):
+        _profesional_en_alcance(conn, actor, profesional_id)
+        conn.execute("DELETE FROM horario_laboral WHERE profesional_id = ?", (profesional_id,))
+        for d, a, b in sorted(franjas):
+            conn.execute("INSERT INTO horario_laboral (id, profesional_id, dia_semana, hora_inicio, hora_fin)"
+                         " VALUES (?, ?, ?, ?, ?)", (str(uuid.uuid4()), profesional_id, d, a, b))
+        detalle = ", ".join(f"{d}:{a}-{b}" for d, a, b in sorted(franjas)) or "sin franjas"
+        _auditar(conn, actor, "HORARIO_ACTUALIZADO", "HorarioLaboral", profesional_id, detalle, reloj.ahora())
+        return listar_horarios(conn, profesional_id)
+
+
+# ---------------------------------------------------------------- §11.9 disponibilidad
+def disponibilidad(conn, servicio_id: str, fecha_txt: str) -> list[dict]:
+    """F-03 con los turnos CONFIRMADO de todos los clientes, sin exponer quién reservó (RBAC-04)."""
+    try:
+        fecha = date.fromisoformat(fecha_txt)
+    except ValueError:
+        raise ErrorDominio("VALIDATION_ERROR", "La fecha debe tener formato AAAA-MM-DD.")
+    ahora = reloj.ahora()
+    svc = conn.execute("SELECT * FROM servicio WHERE id = ?", (servicio_id,)).fetchone()
+    if svc is None:
+        raise ErrorDominio("NOT_FOUND", "El servicio no existe.")
+    if not svc["activo"]:
+        raise ErrorDominio("SERVICE_UNAVAILABLE", "El servicio no está disponible.")
+    hoy = ahora.astimezone(config.ZONA_OPERACION).date()
+    if fecha < hoy:
+        raise ErrorDominio("INVALID_TIME_RANGE", "Esa fecha ya pasó.")
+    if fecha > hoy + timedelta(days=config.HORIZON_DAYS):
+        raise ErrorDominio("INVALID_TIME_RANGE", f"Solo se puede reservar hasta {config.HORIZON_DAYS} días hacia adelante.")
+    prof = svc["profesional_id"]
+    ocupados = [(de_iso(r["inicio"]), de_iso(r["fin"])) for r in conn.execute(
+        "SELECT inicio, fin FROM bloqueo WHERE profesional_id = ?"
+        " UNION ALL SELECT inicio, fin FROM turno WHERE profesional_id = ? AND estado = 'CONFIRMADO'", (prof, prof))]
+    return [{"inicio": a_iso(i), "fin": a_iso(f)}
+            for i, f in slots_del_dia(fecha, svc["duracion_min"], _horarios_de(conn, prof), ocupados, ahora)]
+
+
+# ---------------------------------------------------------------- §11.10 bloqueos
+def listar_bloqueos(conn, actor, profesional_id: str | None = None) -> list[dict]:
+    if actor["rol"] == "CLIENTE":
+        raise ErrorDominio("FORBIDDEN", "No tenés permiso para ver bloqueos.")
+    sql, args = "SELECT * FROM bloqueo WHERE 1 = 1", []
+    if actor["rol"] == "PROFESIONAL":
+        sql += " AND profesional_id = ?"; args.append(actor["id"])
+    if profesional_id:
+        sql += " AND profesional_id = ?"; args.append(profesional_id)
+    return [_fila(r, CAMPOS_BLOQUEO) for r in conn.execute(sql + " ORDER BY inicio", args)]
+
+
+def crear_bloqueo(conn, actor, profesional_id: str, inicio_txt: str, fin_txt: str, motivo: str | None,
+                  confirmar: bool) -> dict:
+    """RN-05: con turnos en el rango, lista los conflictos o (confirmado) los cancela en la misma transacción."""
+    inicio, fin = de_iso(inicio_txt), de_iso(fin_txt)
+    motivo = (motivo or "").strip() or None
+    with db.transaccion(conn):
+        ahora = reloj.ahora()
+        _profesional_en_alcance(conn, actor, profesional_id)
+        if not inicio < fin:
+            raise ErrorDominio("INVALID_TIME_RANGE", "El fin del bloqueo debe ser posterior al inicio.")
+        if fin <= ahora:
+            raise ErrorDominio("INVALID_TIME_RANGE", "No se puede bloquear un rango que ya terminó.")
+        ini_s, fin_s = a_iso(inicio), a_iso(fin)
+        conflictos = conn.execute(
+            "SELECT * FROM turno WHERE profesional_id = ? AND estado = 'CONFIRMADO' AND inicio < ? AND ? < fin"
+            " ORDER BY inicio", (profesional_id, fin_s, ini_s)).fetchall()
+        if any(de_iso(t["inicio"]) <= ahora for t in conflictos):
+            raise ErrorDominio("INVALID_STATE_TRANSITION", "Hay un turno en curso dentro del rango; cerralo antes de bloquear.")
+        if conflictos and not confirmar:
+            raise ErrorDominio("SLOT_UNAVAILABLE",
+                               f"El rango tiene {len(conflictos)} turno(s) confirmado(s). Confirmá su cancelación para crear el bloqueo.",
+                               {"conflictos": [turno_json(t) for t in conflictos]})
+        if conflictos and not motivo:
+            raise ErrorDominio("REASON_REQUIRED", "El motivo es obligatorio para cancelar los turnos afectados.")
+        ahora_s = a_iso(ahora)
+        for t in conflictos:                                               # excepción de RN-01
+            conn.execute("UPDATE turno SET estado = 'CANCELADO', motivo_cancelacion = ?, cancelado_por_id = ?,"
+                         " actualizado_en = ? WHERE id = ?", (motivo, actor["id"], ahora_s, t["id"]))
+            _auditar(conn, actor, "TURNO_CANCELADO", "Turno", t["id"], f"Motivo: {motivo} (bloqueo)", ahora)
+        bloqueo_id = str(uuid.uuid4())
+        conn.execute("INSERT INTO bloqueo (id, profesional_id, inicio, fin, motivo) VALUES (?, ?, ?, ?, ?)",
+                     (bloqueo_id, profesional_id, ini_s, fin_s, motivo))
+        _auditar(conn, actor, "BLOQUEO_CREADO", "Bloqueo", bloqueo_id,
+                 f"{ini_s} → {fin_s}" + (f" · {motivo}" if motivo else "") +
+                 (f" · {len(conflictos)} turno(s) cancelado(s)" if conflictos else ""), ahora)
+        return {
+            "bloqueo": _fila(conn.execute("SELECT * FROM bloqueo WHERE id = ?", (bloqueo_id,)).fetchone(), CAMPOS_BLOQUEO),
+            "turnos_cancelados": [turno_json(conn.execute("SELECT * FROM turno WHERE id = ?", (t["id"],)).fetchone())
+                                  for t in conflictos],
+        }
+
+
+def eliminar_bloqueo(conn, actor, bloqueo_id: str) -> dict:
+    if actor["rol"] == "CLIENTE":
+        raise ErrorDominio("FORBIDDEN", "No tenés permiso para esta acción.")
+    with db.transaccion(conn):
+        b = conn.execute("SELECT * FROM bloqueo WHERE id = ?", (bloqueo_id,)).fetchone()
+        if b is None or (actor["rol"] == "PROFESIONAL" and b["profesional_id"] != actor["id"]):
+            raise ErrorDominio("NOT_FOUND", "El bloqueo no existe o no tenés acceso a él.")
+        conn.execute("DELETE FROM bloqueo WHERE id = ?", (bloqueo_id,))
+        _auditar(conn, actor, "BLOQUEO_ELIMINADO", "Bloqueo", bloqueo_id, f"{b['inicio']} → {b['fin']}", reloj.ahora())
+        return _fila(b, CAMPOS_BLOQUEO)
+
+
+# ---------------------------------------------------------------- §11.11 completar / ausente
+def cerrar_turno(conn, actor, turno_id: str, nuevo: str) -> dict:
+    if actor["rol"] == "CLIENTE":
+        raise ErrorDominio("FORBIDDEN", "No tenés permiso para esta acción.")
+    with db.transaccion(conn):
+        ahora = reloj.ahora()
+        t = conn.execute("SELECT * FROM turno WHERE id = ?", (turno_id,)).fetchone()
+        if t is None or not _visible(actor, t):
+            raise ErrorDominio("NOT_FOUND", "El turno no existe o no tenés acceso a él.")
+        validar_cierre(t["estado"], de_iso(t["inicio"]), de_iso(t["fin"]), ahora, nuevo)     # RN-06
+        conn.execute("UPDATE turno SET estado = ?, actualizado_en = ? WHERE id = ?", (nuevo, a_iso(ahora), turno_id))
+        _auditar(conn, actor, f"TURNO_{nuevo}", "Turno", turno_id, "", ahora)                  # RN-08
+        return turno_json(conn.execute("SELECT * FROM turno WHERE id = ?", (turno_id,)).fetchone())
+
+
+# ---------------------------------------------------------------- §11.12 auditoría
+def auditoria(conn, actor) -> list[dict]:
+    if actor["rol"] == "CLIENTE":
+        raise ErrorDominio("FORBIDDEN", "No tenés permiso para ver la auditoría.")
+    sql, args = "SELECT * FROM auditoria_evento", []
+    if actor["rol"] == "PROFESIONAL":
+        sql += (" WHERE actor_id = ? OR (entidad = 'Turno' AND entidad_id IN"
+                " (SELECT id FROM turno WHERE profesional_id = ?))")
+        args = [actor["id"], actor["id"]]
+    return [_fila(r, CAMPOS_AUDITORIA) for r in conn.execute(sql + " ORDER BY ocurrido_en DESC, rowid DESC", args)]
+
+
+# ---------------------------------------------------------------- §11.13 métricas
+def metricas(conn, actor, desde_txt: str, hasta_txt: str, profesional_id: str | None = None) -> dict:
+    if actor["rol"] == "CLIENTE":
+        raise ErrorDominio("FORBIDDEN", "No tenés permiso para ver métricas.")
+    desde, hasta = de_iso(desde_txt), de_iso(hasta_txt)
+    if not desde < hasta or hasta - desde > timedelta(days=366):
+        raise ErrorDominio("INVALID_TIME_RANGE", "El período debe tener desde < hasta y durar a lo sumo 366 días.")
+    if actor["rol"] == "PROFESIONAL":
+        if profesional_id and profesional_id != actor["id"]:
+            raise ErrorDominio("NOT_FOUND", "El profesional no existe o no tenés acceso a él.")
+        profesional_id = actor["id"]
+    if profesional_id:
+        if conn.execute("SELECT 1 FROM usuario WHERE id = ? AND rol = 'PROFESIONAL'", (profesional_id,)).fetchone() is None:
+            raise ErrorDominio("NOT_FOUND", "El profesional no existe.")
+        profs = [profesional_id]
+    else:
+        profs = [r["id"] for r in conn.execute("SELECT id FROM usuario WHERE rol = 'PROFESIONAL'")]
+    marcas = ",".join("?" * len(profs)) or "NULL"
+    filas = conn.execute(f"SELECT * FROM turno WHERE profesional_id IN ({marcas}) AND inicio >= ? AND inicio < ?",
+                         (*profs, a_iso(desde), a_iso(hasta))).fetchall()
+    turnos = [{"estado": r["estado"], "inicio": de_iso(r["inicio"]), "fin": de_iso(r["fin"]),
+               "servicio_id": r["servicio_id"], "cancelado_por_id": r["cancelado_por_id"]} for r in filas]
+    disponibles = sum(minutos_disponibles(desde, hasta, _horarios_de(conn, p), [
+        (de_iso(b["inicio"]), de_iso(b["fin"])) for b in conn.execute(
+            "SELECT inicio, fin FROM bloqueo WHERE profesional_id = ?", (p,))]) for p in profs)
+    rol_de = {r["id"]: r["rol"] for r in conn.execute("SELECT id, rol FROM usuario")}
+    return {"desde": a_iso(desde), "hasta": a_iso(hasta), **calcular_metricas(turnos, disponibles, rol_de)}

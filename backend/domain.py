@@ -4,7 +4,7 @@ Todas las fechas son datetime con zona (aware). En la base se guardan en UTC
 como texto ISO 8601 con sufijo Z, que se ordena bien como string.
 """
 import re
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import config
 
@@ -119,3 +119,135 @@ def validar_cancelacion(estado: str, inicio: datetime, ahora: datetime, rol: str
     if not motivo:
         raise ErrorDominio("REASON_REQUIRED", "El motivo de cancelación es obligatorio.")
     return motivo
+
+
+def validar_cierre(estado: str, inicio: datetime, fin: datetime, ahora: datetime, nuevo: str) -> None:
+    """RN-06 (spec §11.11): COMPLETADO desde el inicio, AUSENTE desde el fin, solo desde CONFIRMADO."""
+    if estado != "CONFIRMADO":
+        raise ErrorDominio("INVALID_STATE_TRANSITION", f"El turno está {estado}; los estados finales no admiten cambios.")
+    if nuevo == "COMPLETADO" and ahora < inicio:
+        raise ErrorDominio("INVALID_STATE_TRANSITION", "No se puede completar un turno que todavía no comenzó.")
+    if nuevo == "AUSENTE" and ahora < fin:
+        raise ErrorDominio("INVALID_STATE_TRANSITION", "Solo se puede marcar ausente una vez finalizado el turno.")
+
+
+# ---------------------------------------------------------------- F-08 (spec §11.8)
+HORA_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$|^24:00$")
+
+
+def validar_franjas(franjas: list[tuple[int, str, str]]) -> None:
+    """Horas HH:MM alineadas a la grilla, inicio < fin y sin solapamiento dentro del mismo día."""
+    for d, a, b in franjas:
+        if not (HORA_RE.match(a) and HORA_RE.match(b)):
+            raise ErrorDominio("VALIDATION_ERROR", "Las horas deben tener formato HH:MM.")
+        if int(a[3:]) % config.GRID_MIN or int(b[3:]) % config.GRID_MIN:
+            raise ErrorDominio("INVALID_TIME_RANGE", f"Las horas deben estar alineadas a la grilla de {config.GRID_MIN} minutos.")
+        if not a < b:
+            raise ErrorDominio("INVALID_TIME_RANGE", "Cada franja debe terminar después de empezar.")
+    for d in {f[0] for f in franjas}:
+        del_dia = sorted((a, b) for x, a, b in franjas if x == d)
+        if any(del_dia[i][1] > del_dia[i + 1][0] for i in range(len(del_dia) - 1)):
+            raise ErrorDominio("INVALID_TIME_RANGE", "Las franjas de un mismo día no pueden solaparse.")
+
+
+def _ventana(fecha: date, a: str, b: str) -> tuple[datetime, datetime]:
+    """Franja "HH:MM"–"HH:MM" de una fecha local, como instantes con zona."""
+    tz = config.ZONA_OPERACION
+    ini = datetime.combine(fecha, time.fromisoformat(a), tz)
+    fin = datetime.combine(fecha, time(0, 0), tz) + timedelta(days=1) if b == "24:00" \
+        else datetime.combine(fecha, time.fromisoformat(b), tz)
+    return ini, fin
+
+
+# ---------------------------------------------------------------- F-03 (spec §11.9)
+def slots_del_dia(fecha: date, duracion_min: int, horarios: list[tuple[int, str, str]],
+                  ocupados: list[tuple[datetime, datetime]], ahora: datetime) -> list[tuple[datetime, datetime]]:
+    """Slots libres de un día (fecha en zona de operación), con las reglas de RN-02, RN-04 y RN-05."""
+    dia = fecha.isoweekday() % 7
+    libres = []
+    for d, a, b in sorted(horarios, key=lambda h: h[1]):
+        if d != dia:
+            continue
+        cursor, limite = _ventana(fecha, a, b)
+        while cursor + timedelta(minutes=duracion_min) <= limite:
+            ini, fin = cursor.astimezone(timezone.utc), calcular_fin(cursor, duracion_min).astimezone(timezone.utc)
+            try:
+                validar_inicio(ini, ahora)
+                if not any(solapa(ini, fin, oi, of) for oi, of in ocupados):
+                    libres.append((ini, fin))
+            except ErrorDominio:
+                pass
+            cursor += timedelta(minutes=config.GRID_MIN)
+    return libres
+
+
+# ---------------------------------------------------------------- F-12 (spec §5, §11.13)
+def _minutos(a: datetime, b: datetime) -> float:
+    return max(0.0, (b - a).total_seconds() / 60)
+
+
+def _unir(intervalos: list[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:
+    out: list[tuple[datetime, datetime]] = []
+    for a, b in sorted(intervalos):
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def minutos_disponibles(desde: datetime, hasta: datetime, horarios: list[tuple[int, str, str]],
+                        bloqueos: list[tuple[datetime, datetime]]) -> float:
+    """Minutos de horario laboral de un profesional en [desde, hasta), menos sus bloqueos."""
+    tz = config.ZONA_OPERACION
+    bloqueos = _unir(bloqueos)
+    total, fecha = 0.0, desde.astimezone(tz).date()
+    while fecha <= hasta.astimezone(tz).date():
+        for d, a, b in horarios:
+            if d != fecha.isoweekday() % 7:
+                continue
+            ini, fin = _ventana(fecha, a, b)
+            ini, fin = max(ini, desde), min(fin, hasta)
+            if ini >= fin:
+                continue
+            total += _minutos(ini, fin) - sum(_minutos(max(ini, bi), min(fin, bf)) for bi, bf in bloqueos)
+        fecha += timedelta(days=1)
+    return total
+
+
+def calcular_metricas(turnos: list[dict], disponibles: float, rol_de: dict[str, str]) -> dict:
+    """Métricas de spec §5 sobre turnos ya filtrados por período y alcance.
+
+    turnos: dicts con estado, inicio y fin (datetime), servicio_id y cancelado_por_id.
+    """
+    tz = config.ZONA_OPERACION
+    por_estado = {e: sum(1 for t in turnos if t["estado"] == e) for e in ("CONFIRMADO", "COMPLETADO", "CANCELADO", "AUSENTE")}
+    total = len(turnos)
+    activos = [t for t in turnos if t["estado"] != "CANCELADO"]
+    por_dia: dict[str, int] = {}
+    for t in turnos:
+        if t["estado"] in ("CONFIRMADO", "COMPLETADO"):
+            k = t["inicio"].astimezone(tz).date().isoformat()
+            por_dia[k] = por_dia.get(k, 0) + 1
+    cancel_rol = {"CLIENTE": 0, "PROFESIONAL": 0, "ADMIN": 0}
+    for t in turnos:
+        rol = rol_de.get(t["cancelado_por_id"] or "")
+        if t["estado"] == "CANCELADO" and rol in cancel_rol:
+            cancel_rol[rol] += 1
+    top: dict[str, int] = {}
+    for t in activos:
+        top[t["servicio_id"]] = top.get(t["servicio_id"], 0) + 1
+    reservados = sum(_minutos(t["inicio"], t["fin"]) for t in activos)
+    cerrados = por_estado["COMPLETADO"] + por_estado["AUSENTE"]
+    return {
+        "total": total,
+        "por_estado": por_estado,
+        "turnos_por_dia": [{"fecha": f, "cantidad": n} for f, n in sorted(por_dia.items())],
+        "tasa_cancelacion": round(por_estado["CANCELADO"] / total, 4) if total else 0,
+        "cancelaciones_por_rol": cancel_rol,
+        "tasa_ausentismo": round(por_estado["AUSENTE"] / cerrados, 4) if cerrados else 0,
+        "ocupacion": round(min(1.0, reservados / disponibles), 4) if disponibles else 0,
+        "minutos_reservados": round(reservados),
+        "minutos_disponibles": round(disponibles),
+        "top_servicios": [{"servicio_id": s, "cantidad": n} for s, n in sorted(top.items(), key=lambda x: (-x[1], x[0]))],
+    }
