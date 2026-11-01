@@ -235,7 +235,7 @@ cd backend
 .venv/Scripts/python -m pytest
 ```
 
-Cubren los criterios 1 a 12 de [spec.md §8](spec.md), el contrato de la §11, los triggers de la base, la concurrencia (con hilos y con procesos) y CORS.
+Cubren los criterios 1 a 20 de [spec.md §8](spec.md), el contrato de la §11, los triggers de la base, la concurrencia (con hilos y con procesos) y CORS.
 
 **Volver a los datos de ejemplo:** con el backend detenido, `cd backend` y `.venv/Scripts/python seed.py --reset`. Borra `turnos.db` y la vuelve a sembrar con fechas relativas a hoy.
 
@@ -245,7 +245,7 @@ Cubren los criterios 1 a 12 de [spec.md §8](spec.md), el contrato de la §11, l
 - **El selector de usuario es la identidad.** El id elegido viaja en el encabezado `X-Usuario-Id` ([spec.md D-06](spec.md)); el rol lo lee el backend de la base.
 - **Los errores vienen del servidor**, con el código de [spec.md §7](spec.md) (por ejemplo `409 SLOT_UNAVAILABLE` o `409 CANCELLATION_WINDOW_EXPIRED`).
 - **Hora real.** No hay reloj simulado: el backend usa la hora UTC real.
-- **Solo lectura donde no hay contrato.** Catálogo, horarios y bloqueos siguen como datos locales con los mismos id que la semilla ([spec.md D-08](spec.md)). Crear bloqueos, activar servicios, completar turnos, verificar emails y ver la auditoría no tienen endpoint en la v2.0.0 y quedan deshabilitados o solo lectura.
+- **Todo viene del servidor (spec v2.1.0).** Servicios, horarios, disponibilidad, bloqueos, completar / ausente, auditoría y métricas usan los endpoints de [spec.md §11](spec.md). Solo la lista de usuarios sigue local, con los mismos id que la semilla. La verificación de email y los emails no tienen endpoint (spec D-06, D-07).
 
 ### Pruebas rápidas de la Fase 2
 
@@ -253,6 +253,8 @@ Cubren los criterios 1 a 12 de [spec.md §8](spec.md), el contrato de la §11, l
 2. **Doble reserva real:** en el modal de reserva activá "Otro cliente reserva este slot un instante antes". El servidor rechaza tu reserva con `SLOT_UNAVAILABLE`.
 3. **Sin conexión:** detené el backend y recargá. La página avisa y no muestra turnos.
 4. **Aislamiento:** con Modo auditoría, pegá en la vista Cliente el id de un turno ajeno (lo ves en el detalle de la vista Administrador). El servidor responde `404`.
+5. **Disponibilidad real:** como Sofía, mirá los horarios del lunes de la Dra. Martínez: no aparecen los que ya reservó Lucía.
+6. **Bloqueo con conflicto:** en Administrador → Bloqueos, bloqueá un rango con un turno confirmado. El servidor lista el conflicto; con un motivo, cancela el turno y crea el bloqueo en una sola operación. Mirá la pestaña Auditoría.
 
 ## Límites conocidos
 
@@ -267,8 +269,7 @@ Fase 1 (`index.html`):
 Fase 2 (`prototipo-turnos.html` + `backend/`):
 
 - No hay inicio de sesión: la identidad es el encabezado `X-Usuario-Id` (spec D-06).
-- Un cliente no ve las reservas de otros clientes, así que la grilla de horarios es orientativa: el servidor tiene la última palabra. Hace falta un endpoint de disponibilidad (spec D-08).
-- Los bloqueos del frontend se calculan con la fecha de hoy y los de la base con la fecha en que se sembró. Si la base se sembró otro día, pueden no coincidir hasta correr `seed.py --reset`.
+- La lista de usuarios del selector es local (no hay endpoint de usuarios); coincide con la semilla.
 - No se envían emails (spec D-07).
 
 ## Tecnologías
