@@ -4,6 +4,7 @@ Este proyecto forma parte del curso **"Creá tu proyecto con Inteligencia Artifi
 
 - **Prototipo en línea:** https://claude.ai/artifact/JUv3cgvTQv1i2vxf3DK5z2 
 - **Prototipo local:** abrí [index.html](index.html) con doble clic. Necesita internet, porque React y Tailwind se cargan desde CDN.
+- **Fase 2 (software real):** [prototipo-turnos.html](prototipo-turnos.html) + backend FastAPI + SQLite. Ver [Cómo correr la Fase 2](#cómo-correr-la-fase-2).
 
 ## Cómo clonar este repositorio
 
@@ -54,8 +55,10 @@ Las reglas del negocio (sin doble reserva, cancelación hasta 2 horas antes, dat
 | [historias-de-usuario.md](historias-de-usuario.md) | 7 historias de los dos flujos principales, con criterios en Gherkin y casos borde |
 | [plan.md](plan.md) | Plan para convertir la especificación en un prototipo interactivo |
 | [tareas.md](tareas.md) | Tareas organizadas en 9 fases para ejecutar el plan |
-| [index.html](index.html) | La aplicación completa en un solo archivo (dominio, estado, vistas y datos de ejemplo) |
-| [guia-de-uso.md](guia-de-uso.md) | Funcionalidades y guía paso a paso de pruebas en la interfaz |
+| [index.html](index.html) | Fase 1: la aplicación completa en un solo archivo (dominio, estado, vistas y datos de ejemplo). Se conserva sin cambios |
+| [guia-de-uso.md](guia-de-uso.md) | Funcionalidades y guía paso a paso de pruebas en la interfaz (Fase 1) |
+| [prototipo-turnos.html](prototipo-turnos.html) | Fase 2, capa 1: el frontend derivado de index.html que consume la API REST |
+| [backend/](backend/) | Fase 2, capas 2 y 3: API FastAPI (`main.py`), casos de uso (`service.py`), reglas puras (`domain.py`), SQLite (`db.py`), semilla (`seed.py`) y tests (`tests/`) |
 
 ## Cómo se construyó: paso a paso
 
@@ -192,7 +195,68 @@ Abrí [index.html](index.html) y seguí [guia-de-uso.md](guia-de-uso.md). Tres p
 2. **Regla de las 2 horas:** pulsá `+1 min` en el reloj simulado y probá cancelar el turno de las 09:30. Con **Modo auditoría** activado, el dominio lo rechaza con `CANCELLATION_WINDOW_EXPIRED`.
 3. **Doble reserva:** en el modal de reserva, activá la simulación de otro cliente en el mismo instante. Queda un solo turno.
 
+## Cómo correr la Fase 2
+
+La Fase 2 separa el sistema en tres capas ([plan.md §3](plan.md)): el navegador solo presenta, el backend decide y la base de datos recuerda. Los turnos se guardan en `backend/turnos.db` y sobreviven a recargar la página y a reiniciar el servidor (INV-03).
+
+Necesitás **Python 3.11 o superior**. Abrí dos terminales en la carpeta del proyecto.
+
+**Terminal 1 — Backend (puerto 8000).** La primera vez, creá el entorno e instalá las dependencias:
+
+```bash
+cd backend
+python -m venv .venv
+.venv/Scripts/python -m pip install -r requirements.txt
+```
+
+(En macOS o Linux, usá `.venv/bin/python` en lugar de `.venv/Scripts/python`.)
+
+Después, cada vez que quieras usarlo:
+
+```bash
+cd backend
+.venv/Scripts/python -m uvicorn main:app --port 8000
+```
+
+Al arrancar crea `turnos.db` con el esquema de [plan.md §3.3](plan.md) y la carga con los datos de ejemplo si está vacía. La documentación interactiva de la API queda en http://localhost:8000/docs.
+
+**Terminal 2 — Frontend (puerto 5500):**
+
+```bash
+python -m http.server 5500
+```
+
+Abrí http://localhost:5500/prototipo-turnos.html. No lo abras con doble clic: el backend solo acepta pedidos desde `http://localhost:5500` o `http://127.0.0.1:5500` (CORS).
+
+**Tests del backend:**
+
+```bash
+cd backend
+.venv/Scripts/python -m pytest
+```
+
+Cubren los criterios 1 a 12 de [spec.md §8](spec.md), el contrato de la §11, los triggers de la base, la concurrencia (con hilos y con procesos) y CORS.
+
+**Volver a los datos de ejemplo:** con el backend detenido, `cd backend` y `.venv/Scripts/python seed.py --reset`. Borra `turnos.db` y la vuelve a sembrar con fechas relativas a hoy.
+
+### Qué cambia respecto de la Fase 1
+
+- **Los turnos viven en el servidor.** `prototipo-turnos.html` los pide con `GET /api/turnos` y reserva o cancela con `POST`. Si el backend no responde, muestra "Sin conexión con el servidor" y no vuelve a datos en memoria.
+- **El selector de usuario es la identidad.** El id elegido viaja en el encabezado `X-Usuario-Id` ([spec.md D-06](spec.md)); el rol lo lee el backend de la base.
+- **Los errores vienen del servidor**, con el código de [spec.md §7](spec.md) (por ejemplo `409 SLOT_UNAVAILABLE` o `409 CANCELLATION_WINDOW_EXPIRED`).
+- **Hora real.** No hay reloj simulado: el backend usa la hora UTC real.
+- **Solo lectura donde no hay contrato.** Catálogo, horarios y bloqueos siguen como datos locales con los mismos id que la semilla ([spec.md D-08](spec.md)). Crear bloqueos, activar servicios, completar turnos, verificar emails y ver la auditoría no tienen endpoint en la v2.0.0 y quedan deshabilitados o solo lectura.
+
+### Pruebas rápidas de la Fase 2
+
+1. **Persistencia:** reservá un turno como Lucía, recargá la página y después reiniciá el backend. El turno sigue ahí.
+2. **Doble reserva real:** en el modal de reserva activá "Otro cliente reserva este slot un instante antes". El servidor rechaza tu reserva con `SLOT_UNAVAILABLE`.
+3. **Sin conexión:** detené el backend y recargá. La página avisa y no muestra turnos.
+4. **Aislamiento:** con Modo auditoría, pegá en la vista Cliente el id de un turno ajeno (lo ves en el detalle de la vista Administrador). El servidor responde `404`.
+
 ## Límites conocidos
+
+Fase 1 (`index.html`):
 
 - No hay persistencia: al recargar, los datos vuelven al estado inicial.
 - No hay inicio de sesión real; el rol se elige con un selector para poder auditar permisos.
@@ -200,10 +264,18 @@ Abrí [index.html](index.html) y seguí [guia-de-uso.md](guia-de-uso.md). Tres p
 - La concurrencia está simulada: las acciones se procesan una detrás de otra. En un sistema real, la garantía contra la doble reserva debe vivir en la base de datos.
 - Quedan fuera del prototipo: la reserva en nombre de un cliente, el cambio de horario laboral con turnos ya reservados y el alta de servicios nuevos.
 
+Fase 2 (`prototipo-turnos.html` + `backend/`):
+
+- No hay inicio de sesión: la identidad es el encabezado `X-Usuario-Id` (spec D-06).
+- Un cliente no ve las reservas de otros clientes, así que la grilla de horarios es orientativa: el servidor tiene la última palabra. Hace falta un endpoint de disponibilidad (spec D-08).
+- Los bloqueos del frontend se calculan con la fecha de hoy y los de la base con la fecha en que se sembró. Si la base se sembró otro día, pueden no coincidir hasta correr `seed.py --reset`.
+- No se envían emails (spec D-07).
+
 ## Tecnologías
 
-HTML, React 18 y Tailwind CSS cargados por CDN, con íconos de Lucide incluidos en el mismo archivo. No hay compilación ni dependencias locales.
+- **Frontend:** HTML, React 18 y Tailwind CSS cargados por CDN, con íconos de Lucide incluidos en el mismo archivo. No hay compilación.
+- **Backend (Fase 2):** Python, FastAPI y Uvicorn, con SQLite como base de datos y pytest para los tests.
 
 ---
 
-Última actualización: 27 de octubre de 2026.
+Última actualización: 1 de noviembre de 2026.

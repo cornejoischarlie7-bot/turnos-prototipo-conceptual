@@ -1,5 +1,7 @@
 # tareas.md — Tareas por fase para ejecutar [plan.md](plan.md)
 
+> Las fases 0 a 8 corresponden al prototipo en memoria de la Fase 1 del curso (`index.html`), según la versión anterior del plan (disponible en el historial de git). Las tareas de la **Fase 2 del curso** (arquitectura desacoplada, plan.md v2.0.0) están en las fases B1 a B7, al final.
+
 Leyenda: `[ ]` pendiente · `[x]` hecho · **Salida** = entregable de la fase · **Hecho cuando** = criterio de cierre.
 Cada fase depende de la anterior. Las referencias (`RN-xx`, `ERR-xx`, `HU-xx`) apuntan a [spec.md](spec.md) y [historias-de-usuario.md](historias-de-usuario.md).
 
@@ -150,3 +152,68 @@ F0 Preparación → F1 Dominio → F2 Estado → F3 UI compartida → F4 Cliente
 ```
 
 F4 y F5 pueden avanzar en paralelo una vez cerrada la Fase 3, porque ambas consumen el mismo `store` y no se tocan entre sí.
+
+---
+
+# Fase 2 del curso — Arquitectura desacoplada ([plan.md](plan.md) v2.0.0)
+
+Mismo orden que [plan.md §6](plan.md). Fuente de verdad: [spec.md](spec.md) v2.0.0 (§3 INV-01 a INV-03, §4, §7, §8 y §11).
+
+## Fase B1 — Esquema y conexión (plan §3.3)
+
+- [x] B1.1 Seis tablas de spec §4.1 con exactamente sus campos, con el DDL de plan §3.3.1 (`backend/db.py`).
+- [x] B1.2 Triggers de plan §3.3.2: solapamiento por profesional, cliente y bloqueo; profesional del servicio; transiciones y estados terminales; sin borrado de turnos; auditoría inmutable.
+- [x] B1.3 `PRAGMA foreign_keys = ON`, `journal_mode = WAL`, `synchronous = FULL`, `busy_timeout = 5000` en cada conexión.
+- [x] B1.4 Escrituras con `BEGIN IMMEDIATE … COMMIT` y `ROLLBACK` ante cualquier error (INV-03).
+
+**Hecho cuando:** los tests de triggers por SQL directo y de PRAGMAs pasan.
+
+## Fase B2 — Semilla (spec D-08)
+
+- [x] B2.1 Mismos usuarios, servicios, horarios y bloqueos que el mock de index.html (`backend/seed.py`).
+- [x] B2.2 Id UUID (spec §4) determinísticos derivados de las claves del mock (`uid("p1")`), compartidos con `prototipo-turnos.html`.
+- [x] B2.3 Siembra idempotente al arrancar y `seed.py --reset` para volver a los datos de ejemplo.
+
+## Fase B3 — Dominio (plan §3.2)
+
+- [x] B3.1 Reglas puras en `backend/domain.py`: solapamiento `[inicio, fin)`, ventana de cancelación, contacto, grilla, antelación, horizonte, horario laboral y transiciones.
+- [x] B3.2 Reloj inyectable (`backend/reloj.py`) para probar INV-01 sin esperar.
+- [ ] B3.3 Reorganizar en el paquete `app/` que propone plan §3.2 (`app/main.py`, `app/dominio/…`). _(Pendiente: hoy los módulos están planos en `backend/`; el contrato y el comportamiento no cambian.)_
+
+## Fase B4 — Contrato REST (spec §11)
+
+- [x] B4.1 `GET /api/turnos` con RBAC por rol, filtros `estado`, `profesional_id`, `desde`, `hasta` y orden por `inicio`.
+- [x] B4.2 `POST /api/turnos`: cliente para sí, ADMIN con `cliente_id`, `extra="forbid"`, `Location` en el `201`, auditoría en la misma transacción.
+- [x] B4.3 `POST /api/turnos/{id}/cancelar` con campo `motivo`; INV-01 para el cliente, motivo obligatorio para profesional y admin.
+- [x] B4.4 Actor por `X-Usuario-Id` con el rol leído de la base; `401 UNAUTHENTICATED` sin actor válido.
+- [x] B4.5 Errores con formato `{ "error": { "codigo", "mensaje" } }` y los códigos de spec §7, incluidos `VALIDATION_ERROR` y `PERSISTENCE_UNAVAILABLE`.
+- [x] B4.6 CORS solo para `http://localhost:5500` y `http://127.0.0.1:5500`, métodos `GET`/`POST`, encabezados `Content-Type` y `X-Usuario-Id`.
+- [x] B4.7 Quitar los endpoints fuera del contrato v2.0.0 (catálogo, disponibilidad, usuarios, auditoría).
+
+## Fase B5 — Verificación automática (plan §5)
+
+- [x] B5.1 Criterios 1 a 8 aplicables de spec §8 (el 8, bloqueos, queda fuera del contrato v2.0.0).
+- [x] B5.2 Criterio 9: el turno sobrevive al reinicio de la app.
+- [x] B5.3 Criterio 10: si falla la auditoría, el turno no se guarda y la respuesta es `503`.
+- [x] B5.4 Criterios 2 y 12: concurrencia con hilos (vía API) y con procesos (exactamente un `201`).
+- [x] B5.5 Criterio 11: cancelación vía API a 1 h 59 min → `409 CANCELLATION_WINDOW_EXPIRED` y el turno sigue `CONFIRMADO`.
+- [x] B5.6 Triggers por SQL directo, PRAGMAs, solo las 6 tablas de la spec y CORS permitido / no permitido.
+
+**Hecho cuando:** `pytest` en `backend/` queda todo en verde.
+
+## Fase B6 — Frontend `prototipo-turnos.html` (plan §3.1)
+
+- [x] B6.1 Derivado de `index.html`, que queda sin cambios.
+- [x] B6.2 Turnos con `GET /api/turnos` al iniciar, al cambiar de usuario y después de cada acción.
+- [x] B6.3 Reservar y cancelar con `POST` a la API; `X-Usuario-Id` desde el selector de usuario.
+- [x] B6.4 Toasts y avisos con `error.codigo` y `error.mensaje` de la respuesta.
+- [x] B6.5 "Sin conexión con el servidor" sin volver a datos en memoria.
+- [x] B6.6 Catálogo, horarios y bloqueos locales con los mismos id que la semilla; lo que no tiene endpoint queda en solo lectura.
+- [x] B6.7 Reloj simulado reemplazado por la hora real.
+
+## Fase B7 — Prueba de punta a punta y documentación
+
+- [x] B7.1 Backend en `:8000` y frontend en `:5500`: reservar, recargar y reiniciar el backend (el turno sigue), cancelar, error de ventana (`409`) y aviso sin conexión.
+- [ ] B7.2 Reservar el mismo slot desde dos navegadores distintos (plan §5, prueba manual).
+- [x] B7.3 README con cómo correr backend, frontend y tests.
+- [ ] B7.4 Completar la columna "Código" de la trazabilidad de spec §10 (requiere una versión nueva de la spec).
