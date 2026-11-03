@@ -2,14 +2,14 @@
 
 | Campo | Valor |
 |---|---|
-| Versión | 2.1.0 |
-| Versión anterior | 2.0.0 (contrato de turnos); antes, plan del prototipo en memoria (Fase 1), en el historial de git |
-| Base normativa | [spec.md](spec.md) v2.1.0 · [historias-de-usuario.md](historias-de-usuario.md) |
+| Versión | 2.2.0 |
+| Versión anterior | 2.1.0 (contrato ampliado); 2.0.0 (contrato de turnos); antes, plan del prototipo en memoria (Fase 1), en el historial de git |
+| Base normativa | [spec.md](spec.md) v2.2.0 · [historias-de-usuario.md](historias-de-usuario.md) |
 | Prototipo de origen | [index.html](index.html) |
-| Fecha | 2026-11-01 |
+| Fecha | 2026-11-03 |
 | Estado | Pendiente de aprobación |
 
-> Este plan no agrega reglas: implementa las de spec.md v2.1.0. Si algo de este plan contradice la spec, manda la spec. Los cambios de la versión 2.1.0 están en la §8.
+> Este plan no agrega reglas: implementa las de spec.md v2.2.0. Si algo de este plan contradice la spec, manda la spec. Los cambios de la versión 2.1.0 están en la §8; la arquitectura en tres capas sobre el código real (v2.2.0), en la §9.
 
 ---
 
@@ -38,6 +38,8 @@ Guardar los turnos en variables de JavaScript del navegador incumple la spec en 
 ---
 
 ## 3. Arquitectura de 3 capas
+
+> La §3 es el diseño original de v2.0.0. La versión normativa de las capas y sus reglas de dependencia está en spec.md §12, y su correspondencia con los módulos reales de `backend/` en la §9 de este plan.
 
 ```mermaid
 flowchart LR
@@ -380,3 +382,66 @@ Solo la lista de usuarios sigue local (no hay endpoint de usuarios, RBAC-04).
 ### 8.3 Verificación
 
 `backend/tests/test_v21.py` cubre los criterios 8 y 13 a 20 de spec §8, los permisos y los errores de cada endpoint nuevo, y la atomicidad del bloqueo con cancelaciones cuando falla la auditoría.
+
+---
+
+## 9. Arquitectura en tres capas sobre el código real (v2.2.0)
+
+La spec v2.2.0 agrega la §12, que fija las tres capas y las reglas de dependencia ARQ-01 a ARQ-07. **No cambia código, contrato ni esquema:** describe la estructura que ya tiene el repositorio y la vuelve verificable.
+
+### 9.1 Módulos por capa
+
+| Capa | Archivo | Rol | Depende de |
+|---|---|---|---|
+| Presentación | `prototipo-turnos.html` | SPA React + Tailwind (CDN) en `:5500`. La función `api()` envía cada solicitud a `API_BASE` con `X-Usuario-Id` y convierte las respuestas de error en `ApiError`. | Solo el contrato HTTP de spec §11 |
+| Negocio · adaptador HTTP | `backend/main.py` | App FastAPI, CORS, una conexión por solicitud, resolución del actor y manejadores de `ErrorDominio`, `RequestValidationError` y `sqlite3.Error`. | `schemas`, `service`, `domain` (catálogo `HTTP` y `ErrorDominio`), `db.connect`, `seed` (solo al arrancar), `config` |
+| Negocio · adaptador HTTP | `backend/schemas.py` | Modelos Pydantic con `extra="forbid"`: forma de entrada y salida de spec §11.2 y §11.14. | Solo `pydantic` y la biblioteca estándar |
+| Negocio · casos de uso | `backend/service.py` | Una función por endpoint: RBAC, `db.transaccion`, consultas SQL, auditoría (`_auditar`). | `domain`, `db`, `reloj`, `config` |
+| Negocio · dominio | `backend/domain.py` | Reglas puras y catálogo de errores de spec §7. | `config` |
+| Datos | `backend/db.py` | Esquema de las seis tablas de spec §4.1, triggers, `PRAGMA`, `connect` y `transaccion` (`BEGIN IMMEDIATE`). | Solo la biblioteca estándar |
+| Datos | `backend/turnos.db` | Archivo SQLite (no versionado). | — |
+| Datos · arranque | `backend/seed.py` | Semilla idempotente al iniciar la app. | `db`, `config`, `reloj`, `domain.dentro_de_horario` (excepción de spec §12.3) |
+| Transversal | `backend/config.py`, `backend/reloj.py` | Parámetros y hora UTC. | Solo la biblioteca estándar |
+
+Los tests siguen la misma división: `test_domain.py` prueba el dominio sin base, `test_reglas.py` y `test_v21.py` prueban los casos de uso con una base real, y `test_api.py` y `test_concurrencia.py` prueban el sistema a través de HTTP.
+
+### 9.2 Grafo de dependencias real
+
+```mermaid
+flowchart TB
+    UI["prototipo-turnos.html"] -- "HTTP §11" --> main
+    main --> schemas
+    main --> service
+    main --> domain
+    main --> db
+    main -. "arranque" .-> seed
+    service --> domain
+    service --> db
+    seed --> db
+    seed -. "excepción" .-> domain
+    service --> reloj
+    service --> config
+    domain --> config
+```
+
+Todas las flechas apuntan hacia abajo; no hay ciclos ni imports de una capa inferior a una superior. `main → db` es solo `db.connect` (ARQ-05).
+
+### 9.3 Cómo se verifica
+
+Las reglas ARQ se pueden comprobar con búsquedas sobre `backend/` (desde la raíz del repositorio):
+
+| Regla | Comprobación | Resultado esperado |
+|---|---|---|
+| ARQ-03 | `grep -nE "^(import\|from) " backend/domain.py` | Solo `re`, `datetime` y `config` |
+| ARQ-04 | `grep -nE "fastapi\|schemas\|import main" backend/service.py` | Sin coincidencias |
+| ARQ-05 | `grep -n "execute" backend/main.py` | Sin coincidencias |
+| ARQ-06 | `grep -nE "^(import\|from) " backend/db.py` | Solo `sqlite3`, `contextlib` y `pathlib` |
+| ARQ-01 | `grep -n "fetch(" prototipo-turnos.html` | Un único `fetch`, dentro de `api()`, contra `API_BASE` |
+
+Estado al 2026-11-03: las cinco comprobaciones dan el resultado esperado.
+
+### 9.4 Diferencias con la §3 y deuda conocida
+
+- **Rutas de módulos.** La §3.2 propone el paquete `app/` (`app/api/turnos.py`, `app/dominio/reglas.py`, `app/dominio/turnos.py`, …). El código real está plano en `backend/` (decisión 7 de la §7). La equivalencia es: `app/dominio/reglas.py` → `domain.py`, `app/dominio/turnos.py` → `service.py`, `app/api/turnos.py` y `app/main.py` → `main.py`, `app/esquemas.py` → `schemas.py`, `app/semilla.py` → `seed.py`.
+- **SQL dentro de los casos de uso.** `service.py` escribe sus consultas SQL directamente sobre la conexión. Cumple ARQ-05 (es la única puerta a la base en tiempo de solicitud), pero mezcla orquestación y acceso a datos. Si la base cambia de motor, conviene extraer un módulo de repositorio en la capa de datos; queda como tarea opcional, sin cambio de contrato.
+- **Excepción de `seed.py`.** Documentada en spec §12.3.

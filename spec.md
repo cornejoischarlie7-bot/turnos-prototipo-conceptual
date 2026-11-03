@@ -2,15 +2,22 @@
 
 | Campo | Valor |
 |---|---|
-| Versión | 2.1.0 (Fase 2 — Arquitectura desacoplada: contrato ampliado) |
-| Versión anterior | 2.0.0 (contrato de turnos); 0.1.0 (MVP, Fase 1 — prototipo en memoria) |
+| Versión | 2.2.0 (Fase 2 — Arquitectura en tres capas explícita) |
+| Versión anterior | 2.1.0 (contrato ampliado); 2.0.0 (contrato de turnos); 0.1.0 (MVP, Fase 1 — prototipo en memoria) |
 | Estado | Borrador para revisión |
 | Metodología | Spec-Driven Development (SDD) |
-| Fecha | 2026-11-01 |
+| Fecha | 2026-11-03 |
 
 > Este documento es el **contrato del sistema**. Todo código, test y decisión de diseño debe poder trazarse a una sección de este archivo. Si el código y la spec divergen, se corrige primero la spec y luego el código.
 
 Palabras clave normativas: **DEBE** (obligatorio), **NO DEBE** (prohibido), **PUEDE** (opcional), según RFC 2119.
+
+### Cambios de la versión 2.2.0
+
+| Sección | Cambio |
+|---|---|
+| §3, §4, §11 | **Sin cambios.** Reglas, modelo de datos y contrato REST quedan idénticos. |
+| §12 | **Nuevo:** arquitectura en tres capas (presentación, negocio, datos), qué módulos forman cada capa, en qué capa se aplica cada regla y las reglas de dependencia entre capas (ARQ-01 a ARQ-07). |
 
 ### Cambios de la versión 2.1.0
 
@@ -689,3 +696,81 @@ Servicio, HorarioLaboral, Bloqueo y AuditoriaEvento se exponen con exactamente s
 ### 11.15 Fuera de este contrato (v2.1.0)
 
 Registro e inicio de sesión y verificación de email (F-01, D-06), emails (F-13, D-07), alta y edición de servicios (crear, cambiar nombre, duración o precio, F-07) y gestión de usuarios y roles (RBAC-03). Requieren decisiones nuevas y, en el caso de emails y sesiones, cambios en la §4.
+
+---
+
+## 12. Arquitectura en tres capas (v2.2.0)
+
+El sistema se organiza en tres capas: **presentación** (mostrar y capturar intenciones), **negocio** (decidir) y **datos** (recordar). Esta sección fija qué pertenece a cada capa y cómo se pueden depender entre sí. El detalle de implementación y la verificación están en [plan.md](plan.md) §9.
+
+```mermaid
+flowchart TB
+    subgraph P["Capa de presentación"]
+        UI["prototipo-turnos.html<br/>React + Tailwind (CDN), :5500"]
+    end
+    subgraph N["Capa de negocio — backend/ (FastAPI, :8000)"]
+        MAIN["main.py<br/>rutas §11, CORS, actor, errores"]
+        SCH["schemas.py<br/>forma de entrada y salida"]
+        SVC["service.py<br/>casos de uso, RBAC, transacción, auditoría"]
+        DOM["domain.py<br/>reglas puras RN-01..RN-08, errores §7"]
+        MAIN --> SCH
+        MAIN --> SVC
+        MAIN --> DOM
+        SVC --> DOM
+    end
+    subgraph D["Capa de datos"]
+        DB["db.py<br/>esquema, PRAGMA, triggers, transacción"]
+        FILE[("turnos.db<br/>SQLite")]
+        SEED["seed.py<br/>semilla idempotente"]
+        DB --> FILE
+        SEED --> DB
+    end
+    UI -- "HTTP + JSON (§11)<br/>X-Usuario-Id" --> MAIN
+    SVC -- "SQL dentro de<br/>BEGIN IMMEDIATE … COMMIT" --> DB
+```
+
+Los módulos `config.py` (parámetros de RN-01, RN-04, CORS y ruta de la base) y `reloj.py` (hora UTC, reemplazable en tests) son **transversales**: los usan varias capas, no contienen reglas ni estado y no importan ningún otro módulo del proyecto. `index.html` es el prototipo de la Fase 1 y queda fuera de esta arquitectura.
+
+### 12.1 Responsabilidades por capa
+
+| Capa | Módulos | DEBE | NO DEBE |
+|---|---|---|---|
+| Presentación | `prototipo-turnos.html` | Mostrar datos del Backend, capturar intenciones y enviarlas al contrato §11. Traducir `error.codigo` (§7) a mensajes. Mostrar "Sin conexión con el servidor" si el Backend no responde. | Decidir si una operación es válida. Guardar turnos o cualquier entidad de la §4. Caer a datos en memoria cuando no hay conexión. |
+| Negocio | `main.py`, `schemas.py`, `service.py`, `domain.py` | Ser la única autoridad sobre RBAC (§2) y RN-01 a RN-08. Aplicar cada escritura y su `AuditoriaEvento` en una sola transacción (INV-03). Responder con el formato de errores de la §11.1. | Conservar estado propio entre solicitudes. Confiar en validaciones hechas por la presentación. |
+| Datos | `db.py`, `turnos.db`, `seed.py` | Guardar de forma durable (INV-03) solo las entidades de la §4. Reforzar las invariantes que la base puede garantizar (claves, `CHECK`, triggers) como segunda barrera. | Contener lógica de presentación ni reglas que la base no pueda expresar (RBAC, ventanas de tiempo relativas a "ahora"). |
+
+Dentro de la capa de negocio hay dos niveles:
+
+- **Adaptador HTTP** (`main.py`, `schemas.py`): traduce HTTP a llamadas de casos de uso y excepciones a respuestas. Resuelve el actor con `X-Usuario-Id` (D-06), valida la forma del cuerpo (`422 VALIDATION_ERROR`) y convierte `ErrorDominio` y `sqlite3.Error` en el error de la §11.1.
+- **Núcleo de negocio** (`service.py`, `domain.py`): `service.py` contiene los casos de uso (reservar, cancelar, cerrar, bloquear, horarios, servicios, auditoría, métricas): aplica RBAC, abre la transacción, lee y escribe en la base y registra la auditoría. `domain.py` contiene las reglas como funciones puras, sin base de datos ni HTTP.
+
+### 12.2 Dónde se aplica cada regla
+
+| Regla | Negocio: `domain.py` | Negocio: `service.py` | Datos: `db.py` (segunda barrera) |
+|---|---|---|---|
+| RBAC (§2) | — | Cada caso de uso, con el actor ya resuelto | — |
+| RN-01 / INV-01 | `validar_cancelacion` | `cancelar_turno` | — |
+| RN-02 / INV-02 | `slots_del_dia` (con `solapa`), para la disponibilidad | `crear_turno` (consulta de solapamiento por profesional y por cliente), `disponibilidad` | `trg_turno_solapamiento` |
+| RN-03 | `validar_contacto` | `crear_turno` | `CHECK` de largo de `nombre_completo` |
+| RN-04 | `validar_inicio`, `calcular_fin`, `dentro_de_horario`, `validar_franjas` | `crear_turno`, `reemplazar_horario` | `CHECK (inicio < fin)`, `CHECK` de `duracion_min` (múltiplo de 15) |
+| RN-05 | `slots_del_dia`, para la disponibilidad | `crear_turno`, `crear_bloqueo` (con `conflictos`) | `trg_turno_solapamiento` (contra `bloqueo`) |
+| RN-06 | `validar_cancelacion`, `validar_cierre` | `cancelar_turno`, `cerrar_turno` | `trg_turno_transicion`, `trg_turno_sin_borrado` |
+| RN-07 | — | `cambiar_activo_servicio`, `crear_turno` | — |
+| RN-08 | — | `_auditar`, en la misma transacción de cada escritura | `trg_auditoria_sin_update`, `trg_auditoria_sin_borrado` |
+| INV-03 | — | `db.transaccion` en cada escritura | `BEGIN IMMEDIATE`, `PRAGMA synchronous = FULL`, `foreign_keys = ON` |
+| §4.3 | — | — | Claves foráneas, `trg_turno_profesional_servicio` |
+| F-12 (§5) | `calcular_metricas`, `minutos_disponibles` | `metricas` | — |
+
+La presentación PUEDE repetir una regla solo como ayuda visual (por ejemplo, avisar que faltan menos de 2 h para el turno), pero el resultado lo decide siempre la respuesta del Backend (RBAC-01).
+
+### 12.3 Reglas de dependencia entre capas
+
+- **ARQ-01 — Presentación solo por contrato.** La presentación DEBE comunicarse con el negocio únicamente por HTTP + JSON según la §11, con la URL concentrada en `API_BASE`. NO DEBE leer `turnos.db` ni depender de módulos de `backend/`.
+- **ARQ-02 — Dependencias hacia abajo.** Una capa solo PUEDE depender de la capa inmediatamente inferior y de los módulos transversales. Ninguna capa inferior DEBE conocer a una superior: el negocio no conoce a la presentación y los datos no conocen al negocio.
+- **ARQ-03 — Dominio puro.** `domain.py` NO DEBE importar `sqlite3`, `fastapi`, `db`, `service`, `main`, `schemas` ni `reloj`. Solo PUEDE depender de la biblioteca estándar y de `config`. La hora actual le llega como parámetro.
+- **ARQ-04 — Núcleo sin HTTP.** `service.py` NO DEBE importar `fastapi`, `main` ni `schemas`. Recibe valores ya validados en su forma y devuelve diccionarios con los atributos de la §4.1; señala los errores con `ErrorDominio` (§7).
+- **ARQ-05 — Una sola puerta a la base.** Solo `service.py` (y `seed.py` al arrancar) DEBEN ejecutar SQL y abrir transacciones, siempre con `db.transaccion`. `main.py` solo abre y cierra la conexión de cada solicitud con `db.connect` y NO DEBE ejecutar SQL.
+- **ARQ-06 — Datos autónomos.** `db.py` NO DEBE importar módulos del proyecto. Los códigos que levantan sus triggers con `RAISE(ABORT, …)` DEBEN ser códigos de la §7, para que el negocio los traduzca sin conocer el SQL.
+- **ARQ-07 — Errores por capas.** La presentación conoce solo `error.codigo` y `error.mensaje` (§11.1). El negocio traduce los errores de la base a códigos de la §7, y cualquier otro fallo de la base a `503 PERSISTENCE_UNAVAILABLE`, siempre después del `ROLLBACK` (INV-03).
+
+**Excepción documentada:** `seed.py` pertenece a la capa de datos pero usa `domain.dentro_de_horario` para que la semilla respete RN-04. Es una herramienta de arranque, no un camino de solicitudes, y no habilita a otros módulos de datos a depender del negocio.
