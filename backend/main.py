@@ -1,7 +1,10 @@
-"""Capa 2: backend HTTP (FastAPI, puerto 8000). Contrato: spec.md §11 (v2.1.0); plan.md §3.2.
+"""Capa de negocio, adaptador HTTP (FastAPI, puerto 8000). Contrato: spec.md §11; capas: spec.md §12 (v2.2.0).
 
-Arranque (desde backend/):
-    python -m uvicorn main:app --port 8000
+Responsabilidades (spec §12.1): rutas de §11, CORS, actor por `X-Usuario-Id`, traducción de errores a §11.1.
+No ejecuta SQL (ARQ-05): el esquema de `turnos.db` lo crea `db.py` al arrancar y las consultas viven en `service.py`.
+
+Arranque con recarga automática (desde backend/):
+    python -m uvicorn main:app --reload --port 8000
 Swagger UI: http://localhost:8000/docs
 """
 import sqlite3
@@ -24,14 +27,14 @@ from domain import HTTP, ErrorDominio
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Crea el esquema de plan §3.3.1 si no existe y siembra si la base está vacía.
+    # Crea el esquema de spec §4.1 (plan §3.3.1) en turnos.db si no existe y siembra si la base está vacía.
     seed.sembrar_si_vacia(config.DB_PATH)
     yield
 
 
 app = FastAPI(
     title="Sistema de Turnos",
-    version="2.1.0",
+    version="2.2.0",
     description="Contrato de spec.md §11. El actor se identifica con el encabezado `X-Usuario-Id` (D-06).",
     lifespan=lifespan,
 )

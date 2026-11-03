@@ -251,6 +251,35 @@ Mismo orden que [plan.md §6](plan.md). Fuente de verdad: [spec.md](spec.md) v2.
 - [x] B11.4 Prueba de punta a punta: disponibilidad entre clientes, bloqueo con conflicto y motivo, auditoría, métricas, activar y desactivar servicio, guardar horario.
 - [ ] B11.5 Probar Completar y Ausente desde la interfaz con un turno real ya iniciado (cubierto por tests; hoy la semilla no tiene turnos confirmados en curso).
 
+# Fase 2 del curso — Revisión de `main.py` contra el contrato ([spec.md](spec.md) v2.2.0 §11 y §12, [plan.md](plan.md) §9)
+
+Pedido: regenerar `main.py` con CORS, SQLite, tabla `turnos` y los tres endpoints de turnos. Regla: la spec es la única fuente de verdad; donde el pedido difiere, manda la spec y la diferencia queda anotada.
+
+## Fase B12 — `main.py` según spec v2.2.0
+
+- [x] B12.1 Contrastar el pedido con spec §4.1, §7, §11 y §12 y registrar las diferencias (tabla de abajo).
+- [x] B12.2 CORS con `CORSMiddleware` y la lista explícita de `config.py` (plan §3.2: sin `*`).
+- [x] B12.3 SQLite `turnos.db` con `sqlite3` nativo; el esquema de spec §4.1 (incluida la tabla `turno`) se crea al iniciar en el `lifespan` (`seed.sembrar_si_vacia` → `db`), sin SQL en `main.py` (ARQ-05).
+- [x] B12.4 `GET /api/turnos` → `200` con los turnos visibles según RBAC (§11.3).
+- [x] B12.5 `POST /api/turnos` → Pydantic con `extra="forbid"`; INV-02 en el servidor → `409 SLOT_UNAVAILABLE`; `201` con `Location` (§11.4).
+- [x] B12.6 `POST /api/turnos/{id}/cancelar` → INV-01 con el reloj del servidor → `409 CANCELLATION_WINDOW_EXPIRED` a menos de 2 h; `200` con `estado = CANCELADO` (§11.5).
+- [x] B12.7 Docstring de `main.py` con el arranque `--reload` y la URL de Swagger UI; versión de la app alineada con la spec (2.2.0).
+- [x] B12.8 Suite completa en verde y comprobaciones ARQ de plan §9.3 sin cambios.
+
+### Diferencias entre el pedido y la spec (manda la spec)
+
+| Pedido | Spec v2.2.0 | Motivo |
+|---|---|---|
+| `allow_origins=["*"]` | Solo `http://localhost:5500` y `http://127.0.0.1:5500` | plan §3.2 y test de CORS no permitido (plan §5) |
+| Tabla `turnos` con `cliente_nombre`, `cliente_email`, `servicio`, `fecha_hora`, `estado` | Tabla `turno` con `cliente_id`, `profesional_id`, `servicio_id`, `inicio`, `fin`, `estado`, `motivo_cancelacion`, `cancelado_por_id`, `creado_en`, `actualizado_en` | §4.1 y §11.2: el contacto vive en `Usuario` (RN-03) y el turno referencia por UUID |
+| Código `HORARIO_NO_DISPONIBLE` | `SLOT_UNAVAILABLE` (409) | Catálogo §7 |
+| Código `CANCELACION_FUERA_DE_VENTANA` | `CANCELLATION_WINDOW_EXPIRED` (409) | Catálogo §7 |
+| Estado `CANCELADO_CLIENTE` | `CANCELADO`, con `cancelado_por_id` = actor | RN-06 y §11.5 |
+| `main.py` crea la tabla y consulta SQLite | `main.py` solo abre la conexión; el SQL vive en `service.py` y `db.py` | §12.3 ARQ-05 |
+| `GET /api/turnos` devuelve todos los turnos | Turnos visibles según el rol del `X-Usuario-Id` | §11.3, RBAC-01 |
+
+Si se quiere el modelo del pedido, primero hay que cambiar spec §4.1, §7 y §11 (nueva versión) y después el código.
+
 ## Pendientes fuera de v2.1.0
 
 - [ ] Endpoint de usuarios (hoy la lista sigue local en el frontend).
