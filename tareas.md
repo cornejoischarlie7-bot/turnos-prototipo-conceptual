@@ -214,7 +214,7 @@ Mismo orden que [plan.md §6](plan.md). Fuente de verdad: [spec.md](spec.md) v2.
 ## Fase B7 — Prueba de punta a punta y documentación
 
 - [x] B7.1 Backend en `:8000` y frontend en `:5500`: reservar, recargar y reiniciar el backend (el turno sigue), cancelar, error de ventana (`409`) y aviso sin conexión.
-- [ ] B7.2 Reservar el mismo slot desde dos navegadores distintos (plan §5, prueba manual).
+- [x] B7.2 Reservar el mismo slot desde dos navegadores distintos (plan §5, prueba manual). _(2026-11-04: el primer cliente obtiene el turno; el segundo, con la vista sin recargar, recibe `409 SLOT_UNAVAILABLE`. En SQLite queda un solo turno y ningún solape.)_
 - [x] B7.3 README con cómo correr backend, frontend y tests.
 - [ ] B7.4 Completar la columna "Código" de la trazabilidad de spec §10 (requiere una versión nueva de la spec).
 
@@ -279,6 +279,54 @@ Pedido: regenerar `main.py` con CORS, SQLite, tabla `turnos` y los tres endpoint
 | `GET /api/turnos` devuelve todos los turnos | Turnos visibles según el rol del `X-Usuario-Id` | §11.3, RBAC-01 |
 
 Si se quiere el modelo del pedido, primero hay que cambiar spec §4.1, §7 y §11 (nueva versión) y después el código.
+
+# Preparación de la Clase 5 — Aislamiento del repositorio y entorno de pruebas
+
+Pedido: dejar el repositorio y el entorno listos para los tests automatizados. No cambia el contrato de spec §11 ni la arquitectura de §12.
+
+## Fase B13 — Dependencias, entorno y arranque
+
+- [x] B13.1 `backend/requirements.txt` con las dependencias de ejecución (`fastapi`, `uvicorn`, `pydantic`) y de pruebas (`pytest`, `httpx2`), en versiones fijas. _(Hecho con variación: el pedido nombraba `httpx`; se usa `httpx2` porque `starlette.testclient` marca `httpx` como deprecado. `fastapi` 0.163.1 y `pydantic` 2.14.3.)_
+- [x] B13.2 `.gitignore` de Python: entornos virtuales, `__pycache__/`, `.pytest_cache/`, cobertura, base SQLite, `.env` y archivos del sistema operativo y de IDEs.
+- [x] B13.3 `backend/.venv` recreado desde cero solo con `requirements.txt`; `pip check` sin conflictos y nada instalado en el Python global.
+- [x] B13.4 `GET /` redirige (307) a `/docs`, con `include_in_schema=False`: no figura en el contrato ni en OpenAPI.
+- [x] B13.5 `iniciar.py` en la raíz: levanta backend (8000, `--reload`) y frontend (5500, solo `127.0.0.1`) como procesos separados con el Python del venv; verifica puertos libres y Ctrl+C cierra ambos con sus hijos. Atajo documentado en el README.
+- [x] B13.6 Suite completa en verde con el entorno nuevo: 140 pruebas, sin advertencias de deprecación.
+- [x] B13.7 Arranque y cierre con Ctrl+C verificados desde la terminal del usuario: puertos 8000 y 5500 libres, sin procesos huérfanos.
+
+## Fase B14 — Matriz de tests automatizados ([spec.md](spec.md) v2.3.0 §13)
+
+- [x] B14.1 `backend/tests/test_turnos.py` con base SQLite aislada: plantilla sembrada una vez por módulo y copia propia por test; `config.DB_PATH` apunta a la copia y el `TestClient` no ejecuta el `lifespan` (TST-01).
+- [x] B14.2 Guarda de `backend/turnos.db`: huella SHA-256 antes y después del módulo (TST-01).
+- [x] B14.3 Test 1 — reserva válida para mañana: `201`, visible en `GET /api/turnos` desde otro cliente HTTP y escrita en el archivo (INV-03).
+- [x] B14.4 Test 2 — mismo horario y profesional: `409 SLOT_UNAVAILABLE`, sin persistir nada (INV-02).
+- [x] B14.5 Test 3 — cancelación a 5 h: `200 CANCELADO` (INV-01).
+- [x] B14.6 Test 4 — cancelación a 45 min: `409 CANCELLATION_WINDOW_EXPIRED` y el turno sigue `CONFIRMADO` (INV-01). _(Hecho con variación: RN-04 impide crear un turno a 45 min; se crea a 5 h y se adelanta el reloj.)_
+- [x] B14.7 Test 5 — cuerpo inválido en 5 variantes: `422 VALIDATION_ERROR`, sin persistir nada. _(Hecho con variación: el pedido aceptaba 400; la spec fija 422.)_
+- [x] B14.8 Módulo en 1,16 s según pytest (TST-03); suite completa en verde: 149 pruebas.
+- [x] B14.9 spec.md v2.3.0: §13 Matriz de Tests Automatizados y entrada en el historial de cambios.
+
+## Fase B15 — Blindaje de endpoints y refactorización de legibilidad ([spec.md](spec.md) v2.3.1)
+
+Estado de los hitos de la Clase 5: entorno virtual ✅ (B13.1 a B13.3), suite de testing ✅ (B14 y B15.1 a B15.4), refactorización de legibilidad del backend ✅ (B15.5 a B15.7). La reorganización en el paquete `app/` (B3.3) es otra tarea y sigue pendiente.
+
+- [x] B15.1 Sondeo previo de los 3 casos de borde: el backend ya respondía según spec §11.4 y §11.5, así que no hizo falta cambiar la lógica, solo protegerla con tests.
+- [x] B15.2 Test 6 — `servicio_id`, `inicio` o `cliente_id` vacíos o solo con espacios: `422 VALIDATION_ERROR`, sin persistir nada.
+- [x] B15.3 Test 7 — cancelar un turno inexistente (UUID válido o id arbitrario, como cliente o admin): `404 NOT_FOUND`.
+- [x] B15.4 Test 8 — cancelar dos veces: `409 INVALID_STATE_TRANSITION` y el turno no cambia (RN-06). _(Hecho con variación: el pedido aceptaba 400 o 409; la spec fija 409.)_
+- [x] B15.5 `main.py`: rutas agrupadas por etiqueta (turnos, catálogo, agenda), `summary` y descripción en cada ruta, descripción general de la API y de las etiquetas en Swagger, encabezado `X-Usuario-Id` documentado, nombres más claros en manejadores de errores y dependencias (`respuesta_de_error`, `manejar_*`, `abrir_conexion`, `actor_obligatorio`).
+- [x] B15.6 `schemas.py`: descripción de los campos de entrada y de los modelos; cada status de error en Swagger indica qué códigos de la §7 agrupa.
+- [x] B15.7 Contrato sin cambios: comparación automática del OpenAPI antes y después (16 operaciones con las mismas rutas, métodos, parámetros, cuerpos, status y modelos).
+- [x] B15.8 Módulo `test_turnos.py` con 18 casos en 1,67 s (TST-03); suite completa en verde: 158 pruebas, sin advertencias de deprecación.
+- [x] B15.9 spec.md v2.3.1: escenarios 6 a 8 en la §13 y entrada en el historial de cambios. Versión de la app en Swagger alineada (2.3.1).
+
+## Fase B16 — Integración frontend ↔ backend ([spec.md](spec.md) v2.3.2 §13.4)
+
+- [x] B16.1 Prueba en vivo con `iniciar.py` sobre una base temporal (`TURNOS_DB`): las 16 operaciones que usa `prototipo-turnos.html` responden por HTTP real, con preflight CORS desde `:5500`. `backend/turnos.db` no se tocó.
+- [x] B16.2 `backend/tests/test_integracion_frontend.py`: lee el HTML y lo compara con `app.openapi()` (I-1 a I-6): `API_BASE` y CORS, rutas del objeto `Api` contra el contrato, parámetros y claves de los cuerpos, UUID, usuarios y `CONFIG` contra `seed.py` y `config.py`, preflight de cada llamada y pedidos con los cuerpos exactos del navegador.
+- [x] B16.3 Validación de los tests con roturas de ejemplo (ruta, clave del cuerpo, parámetro, UUID, ventana de 2 h, CORS sin `X-Usuario-Id`): cada una hace fallar el test que corresponde.
+- [x] B16.4 39 casos en 1,1 s; suite completa en verde: 197 pruebas, sin advertencias de deprecación.
+- [ ] B16.5 Prueba en un navegador real (renderizado de React, flujos de la UI): queda manual; los tests cubren el contrato entre capas, no la interfaz.
 
 ## Pendientes fuera de v2.1.0
 
